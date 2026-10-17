@@ -36,6 +36,9 @@ type HeatFactor = { name: string; ticker: string; score: number; bias: string; r
 type PriceAlert = { id: number; direction: 'above' | 'below'; target_price: number; active: boolean }
 type Notification = { id: number; message: string; read: boolean; created_at: string }
 type DashboardSummary = { trade_count: number; open_positions: number; closed_pnl: number; win_rate: number | null; active_alerts: number; unread_notifications: number }
+type TechnicalIndicator = { name: string; value: number | null; status: 'bullish' | 'neutral' | 'bearish'; interpretation: string; unit?: string }
+type TechnicalSummary = { overall_bias: string; overall_score: number; trend_strength: string; volatility: string; momentum: string; quality: string }
+type TechnicalAnalysis = { symbol: string; provider: string; status: string; timestamp: string | null; summary: TechnicalSummary; indicators: TechnicalIndicator[] }
 
 const demoCandles: Candle[] = Array.from({ length: 42 }, (_, index) => ({
   date: new Date(Date.now() - (41 - index) * 86400000).toISOString().slice(0, 10),
@@ -80,6 +83,7 @@ function App() {
   const [alerts, setAlerts] = useState<PriceAlert[]>([])
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null)
+  const [technical, setTechnical] = useState<TechnicalAnalysis | null>(null)
   const [alertPrice, setAlertPrice] = useState('')
   const [alertDirection, setAlertDirection] = useState<'above' | 'below'>('above')
   const [loading, setLoading] = useState(true)
@@ -102,9 +106,9 @@ function App() {
       getJson<ProviderHealth>('/api/health'),
       getJson<{ factors: HeatFactor[] }>('/api/market/heatmap'),
       getJson<PriceAlert[]>('/api/alerts'), getJson<Notification[]>('/api/notifications'),
-      getJson<DashboardSummary>('/api/dashboard'),
+      getJson<DashboardSummary>('/api/dashboard'), getJson<TechnicalAnalysis>('/api/analysis/technical'),
     ])
-    const [quoteResult, historyResult, newsResult, calendarResult, signalResult, journalResult, healthResult, heatmapResult, alertsResult, notificationResult, dashboardResult] = results
+    const [quoteResult, historyResult, newsResult, calendarResult, signalResult, journalResult, healthResult, heatmapResult, alertsResult, notificationResult, dashboardResult, technicalResult] = results
     const liveQuote = quoteResult.status === 'fulfilled' ? quoteResult.value : null
     const liveHistory = historyResult.status === 'fulfilled' ? historyResult.value.candles : []
     setLive(Boolean(liveQuote?.status === 'live' && liveHistory.length))
@@ -120,6 +124,7 @@ function App() {
     setAlerts(alertsResult.status === 'fulfilled' ? alertsResult.value : [])
     setNotifications(notificationResult.status === 'fulfilled' ? notificationResult.value : [])
     setDashboard(dashboardResult.status === 'fulfilled' ? dashboardResult.value : null)
+    setTechnical(technicalResult.status === 'fulfilled' ? technicalResult.value : null)
     setLoading(false)
   }
 
@@ -321,6 +326,34 @@ function App() {
             <div className="metric-card"><span>Open</span><strong>{formatPrice(quote?.open)}</strong></div>
             <div className="metric-card"><span>Previous close</span><strong>{formatPrice(quote?.previous_close)}</strong></div>
           </div>
+
+          <section className="panel technical-panel" aria-label="Technical analysis panel">
+            <div className="panel-header"><div><div className="panel-kicker">TECHNICAL ANALYSIS <span className="dot-separator">·</span> XAU/USD</div><h2>Market structure</h2></div><div className="signal-icon"><Gauge size={17} /></div></div>
+            <div className="technical-summary-grid">
+              <div className="tech-score-card">
+                <span>Overall Technical Score</span>
+                <strong>{technical?.summary.overall_score ?? 0}</strong>
+                <small>{technical?.summary.overall_bias ?? 'neutral'}</small>
+              </div>
+              <div className="tech-stat-card"><span>Trend Strength</span><strong>{technical?.summary.trend_strength ?? 'neutral'}</strong></div>
+              <div className="tech-stat-card"><span>Volatility</span><strong>{technical?.summary.volatility ?? 'low'}</strong></div>
+              <div className="tech-stat-card"><span>Momentum</span><strong>{technical?.summary.momentum ?? 'neutral'}</strong></div>
+              <div className="tech-stat-card"><span>Quality</span><strong>{technical?.summary.quality ?? 'limited'}</strong></div>
+            </div>
+            <div className="technical-grid">
+              {(technical?.indicators ?? []).map(indicator => (
+                <div key={indicator.name} className={`tech-card ${indicator.status}`}>
+                  <div className="tech-card-head">
+                    <span>{indicator.name}</span>
+                    <strong>{indicator.value == null ? '—' : indicator.unit === 'USD' ? `$${indicator.value.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : `${indicator.value.toFixed(2)}${indicator.unit ?? '%'}`}</strong>
+                  </div>
+                  <p>{indicator.interpretation}</p>
+                </div>
+              ))}
+              {!technical && <div className="tech-card neutral"><div className="tech-card-head"><span>Technical analysis</span><strong>Loading</strong></div><p>Awaiting market data for the technical engine.</p></div>}
+            </div>
+          </section>
+
           {!live && <div className="demo-ribbon"><ShieldAlert size={13} /> SIMULATED PREVIEW DATA · Configure an Alpha Vantage key and set <code>VITE_DEMO_MODE=false</code> for live-only display.</div>}
           <div className="provider-status-bar" aria-live="polite">
             {Object.entries(providerStatus).length ? Object.entries(providerStatus).map(([name, info]) => (

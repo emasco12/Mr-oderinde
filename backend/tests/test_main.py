@@ -292,3 +292,43 @@ def test_heatmap_only_uses_sourced_market_and_calendar_inputs(
     assert result["factors"][0]["score"] > 0
     assert result["factors"][1]["score"] == 0.5
     assert "1 high-impact event" in result["factors"][2]["reading"]
+
+
+def test_technical_analysis_returns_indicators_and_summary(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candles = [
+        {"date": f"2024-01-{day:02d}", "open": 2200 + day, "high": 2210 + day, "low": 2195 + day, "close": 2205 + day, "volume": 1800}
+        for day in range(1, 61)
+    ]
+    monkeypatch.setattr(
+        main.alpha_vantage,
+        "fetch",
+        AsyncMock(return_value={"data": candles}),
+    )
+
+    result = client.get("/api/analysis/technical").json()
+
+    assert result["status"] == "live"
+    assert result["provider"] == "Alpha Vantage"
+    assert result["summary"]["overall_bias"] in {"bullish", "bearish", "neutral"}
+    assert len(result["indicators"]) == 13
+    assert {indicator["name"] for indicator in result["indicators"]} >= {"EMA 20", "RSI (14)", "MACD", "VWAP", "Stochastic RSI"}
+
+
+def test_technical_analysis_fails_gracefully_when_provider_is_unavailable(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main.alpha_vantage,
+        "fetch",
+        AsyncMock(side_effect=RuntimeError("Provider unavailable")),
+    )
+
+    result = client.get("/api/analysis/technical").json()
+
+    assert result["status"] == "unavailable"
+    assert result["summary"]["overall_bias"] == "neutral"
+    assert result["indicators"][0]["interpretation"] == "Technical data is temporarily unavailable."

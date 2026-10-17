@@ -24,6 +24,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 from backend.config import validate_required_api_keys
 from backend.services import alpha_vantage, finnhub, newsapi
+from backend.services.technical_analysis import analyze_market
 
 
 logger = logging.getLogger(__name__)
@@ -632,6 +633,47 @@ async def gold_history() -> dict:
                 "status": "unavailable",
                 "note": "Gold history is unavailable from Alpha Vantage and Finnhub.",
             }
+
+
+@app.get("/api/analysis/technical")
+async def technical_analysis() -> dict:
+    try:
+        data = await alpha_vantage.fetch("GOLD_SILVER_HISTORY", symbol="GOLD", interval="daily")
+        candles = data.get("data", [])
+        if not isinstance(candles, list) or not candles:
+            raise RuntimeError("Alpha Vantage returned no gold history.")
+        return analyze_market(candles, provider="Alpha Vantage")
+    except (RuntimeError, httpx.HTTPError, KeyError, TypeError, ValueError, OSError):
+        logger.warning("Technical analysis could not load from Alpha Vantage; falling back to neutral output.")
+        return {
+            "symbol": "XAU/USD",
+            "provider": "unavailable",
+            "status": "unavailable",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "summary": {
+                "overall_bias": "neutral",
+                "overall_score": 0,
+                "trend_strength": "neutral",
+                "volatility": "low",
+                "momentum": "neutral",
+                "quality": "limited",
+            },
+            "indicators": [
+                {"name": "EMA 20", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "EMA 50", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "EMA 200", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "SMA 20", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "RSI (14)", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "%"},
+                {"name": "MACD", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "%"},
+                {"name": "ATR", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "ADX", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "%"},
+                {"name": "Bollinger Upper", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "Bollinger Mid", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "Bollinger Lower", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "VWAP", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "Stochastic RSI", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "%"},
+            ],
+        }
 
 
 @app.get("/api/calendar")
