@@ -53,6 +53,16 @@ describe('App', () => {
         if (path === '/api/news') {
           return makeJsonResponse({ items: [{ title: 'Gold demand remains strong', url: '#', published_at: '2026-10-17T11:00:00Z', source: 'Reuters', sentiment_score: 0.4, bias: 'Bullish', impact: 'High' }] })
         }
+        if (path === '/api/news/intelligence') {
+          return makeJsonResponse({
+            status: 'live',
+            source: 'NewsAPI',
+            sentiment: { score: 0.42, bias: 'bullish', article_count: 1, source: 'NewsAPI', method: 'Transparent headline scoring; not financial advice.' },
+            prediction: { direction: 'bullish', probability: 68, confidence: 'moderate', rationale: 'Headline momentum is skewed toward gold-supportive catalysts.' },
+            headline_focus: 'Gold demand remains strong',
+            timestamp: '2026-10-17T12:00:00Z',
+          })
+        }
         if (path === '/api/calendar') {
           return makeJsonResponse({ events: [{ title: 'US CPI', date: '2026-10-18', impact: 'high' }] })
         }
@@ -169,6 +179,19 @@ describe('App', () => {
       expect(screen.getByText('The next major macro catalyst is US CPI and the macro bias is bullish.')).toBeInTheDocument()
     })
     expect(screen.getAllByText('Bullish').length).toBeGreaterThan(0)
+  })
+
+  it('renders the news intelligence prediction panel', async () => {
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Headlines provide context, not trade instructions.')).toBeInTheDocument()
+    })
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/BULLISH/i).length).toBeGreaterThan(0)
+    })
+    expect(screen.getByText(/Headline momentum is skewed toward gold-supportive catalysts/i)).toBeInTheDocument()
   })
 
   it('allows a user to verify their email address', async () => {
