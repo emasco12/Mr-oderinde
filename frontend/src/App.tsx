@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { type FormEvent, useEffect, useState } from 'react'
 import {
   Activity, ArrowDownRight, ArrowRight, ArrowUpRight, BarChart3, Bell, BookOpen,
   BrainCircuit, CalendarDays, Check, ChevronDown, CircleDollarSign, Clock3, Crosshair,
@@ -210,7 +210,7 @@ function App() {
   const [showJournalForm, setShowJournalForm] = useState(false)
   const [journalError, setJournalError] = useState('')
   const [risk, setRisk] = useState({ account_balance: '25000', risk_percent: '1', entry_price: '4340', stop_price: '4300' })
-  const [riskResult, setRiskResult] = useState<{ risk_amount: number; position_ounces: number; standard_lots: number } | null>(null)
+  const [riskResult, setRiskResult] = useState<{ risk_amount: number; stop_distance: number; position_ounces: number; standard_lots: number; risk_status?: string; risk_reward_ratio?: number; target_price?: number; risk_budget_percent?: number; position_size_rating?: string; interpretation?: string } | null>(null)
   const [journalForm, setJournalForm] = useState<{ side: 'BUY' | 'SELL'; entry_price: string; exit_price: string; quantity_ounces: string; thesis: string }>({ side: 'BUY', entry_price: '', exit_price: '', quantity_ounces: '', thesis: '' })
   const [notice, setNotice] = useState('')
   const [verificationCode, setVerificationCode] = useState('')
@@ -311,17 +311,22 @@ function App() {
     } finally { setAnalyzing(null) }
   }
 
-  async function calculateRisk(event: React.FormEvent<HTMLFormElement>) {
+  async function calculateRisk(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const payload = Object.fromEntries(Object.entries(risk).map(([key, value]) => [key, Number(value)]))
     try {
       const response = await apiFetch('/api/risk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
       if (!response.ok) throw new Error()
-      setRiskResult(await response.json())
+      const result = await response.json() as { risk_amount: number; stop_distance: number; position_ounces: number; standard_lots: number; risk_status?: string; risk_reward_ratio?: number; target_price?: number; risk_budget_percent?: number; position_size_rating?: string; interpretation?: string }
+      setRiskResult(result)
     } catch {
-      const riskAmount = Number(risk.account_balance) * Number(risk.risk_percent) / 100
+      const riskPercent = Number(risk.risk_percent) || 0
+      const riskAmount = Number(risk.account_balance) * riskPercent / 100
       const distance = Math.abs(Number(risk.entry_price) - Number(risk.stop_price))
-      setRiskResult(distance ? { risk_amount: riskAmount, position_ounces: riskAmount / distance, standard_lots: riskAmount / distance / 100 } : null)
+      const profile = riskPercent <= 1 ? 'Conservative' : riskPercent <= 2 ? 'Balanced' : riskPercent <= 3 ? 'Active' : 'Aggressive'
+      const status = riskPercent <= 1 ? 'Controlled' : riskPercent <= 2 ? 'Moderate' : riskPercent <= 3 ? 'Elevated' : 'High'
+      const baseResult = distance ? { risk_amount: riskAmount, stop_distance: distance, position_ounces: riskAmount / distance, standard_lots: riskAmount / distance / 100, risk_status: status, risk_reward_ratio: 2, target_price: Number(risk.entry_price) + (Number(risk.entry_price) >= Number(risk.stop_price) ? distance * 2 : -distance * 2), risk_budget_percent: Number(risk.risk_percent), position_size_rating: profile, interpretation: 'The trade keeps exposure within a disciplined risk framework while preserving upside potential.' } : null
+      setRiskResult(baseResult)
     }
   }
 
@@ -781,15 +786,29 @@ function App() {
             </section>
 
             <section className="panel risk-panel">
-              <div className="panel-header"><div><div className="panel-kicker">POSITION PLANNING <span className="dot-separator">·</span> XAU/USD</div><h2>Risk calculator</h2></div><Gauge size={17} className="muted-icon" /></div>
+              <div className="panel-header"><div><div className="panel-kicker">POSITION PLANNING <span className="dot-separator">·</span> XAU/USD</div><h2>Risk management suite</h2></div><Gauge size={17} className="muted-icon" /></div>
               <form className="risk-form" onSubmit={calculateRisk}>
                 <label>ACCOUNT SIZE <div className="input-wrap"><span>$</span><input type="number" min="1" step="any" value={risk.account_balance} onChange={event => setRisk({ ...risk, account_balance: event.target.value })} required /></div></label>
                 <label>RISK / TRADE <div className="input-wrap"><input type="number" min="0.01" max="100" step="0.1" value={risk.risk_percent} onChange={event => setRisk({ ...risk, risk_percent: event.target.value })} required /><span>%</span></div></label>
                 <label>ENTRY PRICE <div className="input-wrap"><span>$</span><input type="number" min="0.01" step="any" value={risk.entry_price} onChange={event => setRisk({ ...risk, entry_price: event.target.value })} required /></div></label>
                 <label>STOP PRICE <div className="input-wrap"><span>$</span><input type="number" min="0.01" step="any" value={risk.stop_price} onChange={event => setRisk({ ...risk, stop_price: event.target.value })} required /></div></label>
-                <button className="calculate-button" type="submit"><CircleDollarSign size={14} /> CALCULATE POSITION</button>
+                <button className="calculate-button" type="submit" onClick={event => { event.preventDefault(); void calculateRisk(event as unknown as FormEvent<HTMLFormElement>) }}><CircleDollarSign size={14} /> CALCULATE POSITION</button>
               </form>
-              {riskResult && <div className="risk-result"><div><span>MAX LOSS</span><strong>${riskResult.risk_amount.toLocaleString()}</strong></div><div><span>POSITION SIZE</span><strong>{riskResult.position_ounces.toFixed(2)} <small>oz</small></strong></div><div><span>STANDARD LOTS</span><strong>{riskResult.standard_lots.toFixed(3)}</strong></div></div>}
+              {riskResult && <>
+                <div className={`risk-status ${riskResult.risk_status?.toLowerCase() ?? 'controlled'}`}>
+                  <span>Risk profile</span>
+                  <strong>{riskResult.risk_status ?? 'Controlled'}</strong>
+                </div>
+                <div className="risk-result">
+                  <div><span>MAX LOSS</span><strong>${riskResult.risk_amount.toLocaleString()}</strong></div>
+                  <div><span>POSITION SIZE</span><strong>{riskResult.position_ounces.toFixed(2)} <small>oz</small></strong></div>
+                  <div><span>STANDARD LOTS</span><strong>{riskResult.standard_lots.toFixed(3)}</strong></div>
+                  <div><span>R:R</span><strong>{riskResult.risk_reward_ratio ? `1:${riskResult.risk_reward_ratio.toFixed(1)}` : '1:2.0'}</strong></div>
+                  <div><span>TARGET</span><strong>${(riskResult.target_price ?? Number(risk.entry_price)).toLocaleString('en-US', { maximumFractionDigits: 2 })}</strong></div>
+                  <div><span>PROFILE</span><strong>{riskResult.position_size_rating ?? 'Balanced'}</strong></div>
+                </div>
+                <div className="risk-summary"><small>{riskResult.interpretation ?? 'Trade sizing remains disciplined within the current market conditions.'}</small></div>
+              </>}
               <div className="risk-note"><ShieldAlert size={12} /> Sizing estimate only. Verify contract specs with your broker.</div>
             </section>
 
