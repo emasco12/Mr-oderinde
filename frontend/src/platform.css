@@ -1,0 +1,17 @@
+@media (max-width: 720px) {
+  .dashboard-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard-summary > div:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .dashboard-summary > div:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .account-email {
+    display: none;
+  }
+}

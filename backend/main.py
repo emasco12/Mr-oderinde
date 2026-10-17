@@ -428,6 +428,55 @@ def serialize_notification(notification: Notification) -> dict:
     }
 
 
+def _normalize_market_number(raw_value: object) -> float | None:
+    if raw_value in (None, "", "N/A"):
+        return None
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_quote_fields(payload: dict) -> dict:
+    data = payload.get("Global Quote") if isinstance(payload, dict) and isinstance(payload.get("Global Quote"), dict) else payload
+    if not isinstance(data, dict):
+        return {
+            "open": None,
+            "daily_high": None,
+            "daily_low": None,
+            "previous_close": None,
+            "change_percent": None,
+        }
+
+    open_value = _normalize_market_number(data.get("02. open") or data.get("open"))
+    high_value = _normalize_market_number(data.get("03. high") or data.get("high"))
+    low_value = _normalize_market_number(data.get("04. low") or data.get("low"))
+    previous_close = _normalize_market_number(data.get("08. previous close") or data.get("previous_close"))
+    change_percent = data.get("10. change percent") or data.get("change_percent")
+    price = _normalize_market_number(data.get("05. price") or data.get("price"))
+    if price is None and "price" in payload:
+        price = _normalize_market_number(payload["price"])
+
+    if isinstance(change_percent, str):
+        change_percent = change_percent.replace("%", "").strip()
+    if change_percent is not None:
+        try:
+            change_percent = float(change_percent)
+        except (TypeError, ValueError):
+            change_percent = None
+    elif previous_close and price is not None:
+        change_percent = ((price - previous_close) / previous_close) * 100
+
+    return {
+        "open": open_value,
+        "daily_high": high_value,
+        "daily_low": low_value,
+        "previous_close": previous_close,
+        "change_percent": change_percent,
+        "price": price,
+    }
+
+
 @app.get("/api/health")
 async def health() -> dict:
     global provider_health_cache
@@ -454,6 +503,7 @@ async def health() -> dict:
 
     checked = await asyncio.gather(
         check_provider("Alpha Vantage", "primary", alpha_vantage.health_check),
+        check_provider("NewsAPI", "primary", newsapi.health_check),
         check_provider("Finnhub", "secondary", finnhub.health_check),
     )
     providers = dict(checked)
@@ -484,10 +534,16 @@ async def gold_quote() -> dict:
         return quote_cache[1]
     try:
         quote = await alpha_vantage.fetch("GOLD_SILVER_SPOT", symbol="GOLD")
+        quote_fields = _extract_quote_fields(quote)
         result = {
             "symbol": "XAU/USD",
-            "price": float(quote["price"]),
-            "updated_at": quote.get("timestamp"),
+            "price": float(quote_fields.get("price") if quote_fields.get("price") is not None else quote["price"]),
+            "open": quote_fields.get("open"),
+            "daily_high": quote_fields.get("daily_high"),
+            "daily_low": quote_fields.get("daily_low"),
+            "previous_close": quote_fields.get("previous_close"),
+            "change_percent": quote_fields.get("change_percent"),
+            "updated_at": quote.get("timestamp") or datetime.now(timezone.utc).isoformat(),
             "source": "Alpha Vantage",
             "status": "live",
             "note": None,
@@ -503,6 +559,11 @@ async def gold_quote() -> dict:
             result = {
                 "symbol": "XAU/USD",
                 "price": float(quote["c"]),
+                "open": None,
+                "daily_high": None,
+                "daily_low": None,
+                "previous_close": None,
+                "change_percent": None,
                 "updated_at": datetime.fromtimestamp(quote["t"], timezone.utc).isoformat(),
                 "source": "Finnhub",
                 "status": "live",
@@ -517,6 +578,11 @@ async def gold_quote() -> dict:
             return {
                 "symbol": "XAU/USD",
                 "price": None,
+                "open": None,
+                "daily_high": None,
+                "daily_low": None,
+                "previous_close": None,
+                "change_percent": None,
                 "updated_at": None,
                 "source": "unavailable",
                 "status": "unavailable",

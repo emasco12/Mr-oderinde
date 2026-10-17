@@ -56,11 +56,13 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient, None, None]
 def test_health(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     main.provider_health_cache = None
     monkeypatch.setattr(main.alpha_vantage, "health_check", AsyncMock())
+    monkeypatch.setattr(main.newsapi, "health_check", AsyncMock())
     monkeypatch.setattr(main.finnhub, "health_check", AsyncMock())
     response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
     assert response.json()["providers"]["Alpha Vantage"]["status"] == "available"
+    assert response.json()["providers"]["NewsAPI"]["status"] == "available"
     assert response.json()["providers"]["Finnhub"]["status"] == "available"
 
 
