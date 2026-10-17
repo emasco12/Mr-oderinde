@@ -116,6 +116,17 @@ describe('App', () => {
             indicators: [{ name: 'Session Bias', value: 'Bullish', status: 'bullish', interpretation: 'Current structure remains bullish.' }],
           })
         }
+        if (path === '/api/analysis/order-flow') {
+          return makeJsonResponse({
+            symbol: 'XAU/USD',
+            provider: 'Alpha Vantage',
+            status: 'live',
+            timestamp: '2026-10-17T12:00:00Z',
+            order_flow: { trend: 'Bullish', pressure: 'Bullish', absorption: 'Strong', participation: 'High', imbalance: 0.18, interpretation: 'Institutional buying is absorbing supply and expanding the trend.' },
+            market_context: { volatility: 'Moderate', bias: 'Bullish', execution_quality: 'High' },
+            signals: [{ name: 'Pressure', value: 'Bullish', status: 'bullish', interpretation: 'Buying pressure is stronger than selling pressure.' }],
+          })
+        }
 
         return makeJsonResponse({}, 404)
       }),
@@ -169,5 +180,16 @@ describe('App', () => {
 
     expect(screen.getAllByText('Session bias').length).toBeGreaterThan(0)
     expect(screen.getAllByText('Displacement').length).toBeGreaterThan(0)
+  })
+
+  it('renders the Institutional Order Flow panel', async () => {
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Institutional order flow')).toBeInTheDocument()
+    })
+
+    expect(screen.getByText('Pressure')).toBeInTheDocument()
+    expect(screen.getByText('Participation')).toBeInTheDocument()
   })
 })

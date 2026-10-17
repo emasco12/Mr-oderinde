@@ -24,6 +24,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 from backend.config import validate_required_api_keys
 from backend.services import alpha_vantage, finnhub, newsapi
+from backend.services.institutional_order_flow import analyze_order_flow
 from backend.services.signal_engine import generate_signal
 from backend.services.ict_concepts import analyze_ict
 from backend.services.smart_money import analyze_smc
@@ -836,6 +837,40 @@ async def ict_analysis() -> dict:
                 {"name": "Liquidity Sweep", "value": "None", "status": "neutral", "interpretation": "No liquidity sweep available.", "unit": "context"},
                 {"name": "Displacement", "value": None, "status": "neutral", "interpretation": "Displacement data is unavailable.", "unit": "%"},
                 {"name": "FVG", "value": "None", "status": "neutral", "interpretation": "No fair value gap is available.", "unit": "context"},
+            ],
+        }
+
+
+@app.get("/api/analysis/order-flow")
+async def order_flow_analysis() -> dict:
+    try:
+        data = await alpha_vantage.fetch("GOLD_SILVER_HISTORY", symbol="GOLD", interval="daily")
+        candles = data.get("data", [])
+        if not isinstance(candles, list) or not candles:
+            raise RuntimeError("Alpha Vantage returned no order-flow history.")
+        return analyze_order_flow(candles, provider="Alpha Vantage")
+    except (RuntimeError, httpx.HTTPError, KeyError, TypeError, ValueError, OSError):
+        logger.warning("Institutional order-flow analysis could not load from Alpha Vantage; returning neutral fallback.")
+        return {
+            "symbol": "XAU/USD",
+            "provider": "unavailable",
+            "status": "unavailable",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "order_flow": {
+                "trend": "Neutral",
+                "pressure": "Balanced",
+                "absorption": "Low",
+                "participation": "Low",
+                "imbalance": 0.0,
+                "interpretation": "Institutional order-flow data is temporarily unavailable.",
+            },
+            "market_context": {
+                "volatility": "Low",
+                "bias": "Neutral",
+                "execution_quality": "Limited",
+            },
+            "signals": [
+                {"name": "Pressure", "value": "Neutral", "status": "neutral", "interpretation": "Order-flow context is unavailable."},
             ],
         }
 

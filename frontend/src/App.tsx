@@ -89,6 +89,22 @@ type ICTAnalysis = {
   narrative: string
   indicators: Array<{ name: string; value: string | number | null; status: 'bullish' | 'neutral' | 'bearish'; interpretation: string; unit?: string }>
 }
+type OrderFlowAnalysis = {
+  symbol: string
+  provider: string
+  status: string
+  timestamp: string | null
+  order_flow: {
+    trend: string
+    pressure: string
+    absorption: string
+    participation: string
+    imbalance: number | null
+    interpretation: string
+  }
+  market_context: { volatility: string; bias: string; execution_quality: string }
+  signals: Array<{ name: string; value: string | number | null; status: 'bullish' | 'neutral' | 'bearish'; interpretation: string }>
+}
 
 const demoCandles: Candle[] = Array.from({ length: 42 }, (_, index) => ({
   date: new Date(Date.now() - (41 - index) * 86400000).toISOString().slice(0, 10),
@@ -137,6 +153,7 @@ function App() {
   const [technical, setTechnical] = useState<TechnicalAnalysis | null>(null)
   const [smc, setSmc] = useState<SMCAnalysis | null>(null)
   const [ict, setIct] = useState<ICTAnalysis | null>(null)
+  const [orderFlow, setOrderFlow] = useState<OrderFlowAnalysis | null>(null)
   const [alertPrice, setAlertPrice] = useState('')
   const [alertDirection, setAlertDirection] = useState<'above' | 'below'>('above')
   const [loading, setLoading] = useState(true)
@@ -163,9 +180,9 @@ function App() {
       getJson<{ factors: HeatFactor[] }>('/api/market/heatmap'),
       getJson<PriceAlert[]>('/api/alerts'), getJson<Notification[]>('/api/notifications'),
       getJson<DashboardSummary>('/api/dashboard'), getJson<TechnicalAnalysis>('/api/analysis/technical'),
-      getJson<SMCAnalysis>('/api/analysis/smc'), getJson<ICTAnalysis>('/api/analysis/ict'),
+      getJson<SMCAnalysis>('/api/analysis/smc'), getJson<ICTAnalysis>('/api/analysis/ict'), getJson<OrderFlowAnalysis>('/api/analysis/order-flow'),
     ])
-    const [quoteResult, historyResult, newsResult, calendarResult, signalResult, journalResult, healthResult, heatmapResult, alertsResult, notificationResult, dashboardResult, technicalResult, smcResult, ictResult] = results
+    const [quoteResult, historyResult, newsResult, calendarResult, signalResult, journalResult, healthResult, heatmapResult, alertsResult, notificationResult, dashboardResult, technicalResult, smcResult, ictResult, orderFlowResult] = results
     const liveQuote = quoteResult.status === 'fulfilled' ? quoteResult.value : null
     const liveHistory = historyResult.status === 'fulfilled' ? historyResult.value.candles : []
     setLive(Boolean(liveQuote?.status === 'live' && liveHistory.length))
@@ -185,6 +202,7 @@ function App() {
     setTechnical(technicalResult.status === 'fulfilled' ? technicalResult.value : null)
     setSmc(smcResult.status === 'fulfilled' ? smcResult.value : null)
     setIct(ictResult.status === 'fulfilled' ? ictResult.value : null)
+    setOrderFlow(orderFlowResult.status === 'fulfilled' ? orderFlowResult.value : null)
     setLoading(false)
   }
 
@@ -573,6 +591,38 @@ function App() {
                 </div>
               </div>
               <div className="signal-disclaimer"><Sparkles size={12} /><span>{ict?.narrative ?? 'ICT context is being loaded.'}</span></div>
+            </section>
+
+            <section className="panel order-flow-panel" aria-label="Institutional order flow">
+              <div className="panel-header"><div><div className="panel-kicker">ORDER FLOW <span className="dot-separator">·</span> XAU/USD</div><h2>Institutional order flow</h2></div><div className="signal-icon"><BarChart3 size={17} /></div></div>
+              <div className="smc-grid">
+                <div className="smc-card">
+                  <span>Trend</span>
+                  <strong>{orderFlow?.order_flow.trend ? orderFlow.order_flow.trend.toUpperCase() : 'NEUTRAL'}</strong>
+                  <small>{orderFlow?.order_flow.interpretation ?? 'Order-flow context unavailable.'}</small>
+                </div>
+                <div className="smc-card">
+                  <span>Pressure</span>
+                  <strong>{orderFlow?.order_flow.pressure ? orderFlow.order_flow.pressure.toUpperCase() : 'BALANCED'}</strong>
+                  <small>{orderFlow?.market_context.bias ?? 'Bias unavailable'}</small>
+                </div>
+                <div className="smc-card">
+                  <span>Absorption</span>
+                  <strong>{orderFlow?.order_flow.absorption ? orderFlow.order_flow.absorption.toUpperCase() : 'LOW'}</strong>
+                  <small>{orderFlow?.market_context.execution_quality ?? 'Execution quality unavailable'}</small>
+                </div>
+                <div className="smc-card">
+                  <span>Participation</span>
+                  <strong>{orderFlow?.order_flow.participation ? orderFlow.order_flow.participation.toUpperCase() : 'LOW'}</strong>
+                  <small>{orderFlow?.market_context.volatility ?? 'Volatility unavailable'}</small>
+                </div>
+                <div className="smc-card">
+                  <span>Imbalance</span>
+                  <strong>{orderFlow?.order_flow.imbalance == null ? '0.00' : `${orderFlow.order_flow.imbalance.toFixed(2)}`}</strong>
+                  <small>Flow imbalance ratio</small>
+                </div>
+              </div>
+              <div className="signal-disclaimer"><Sparkles size={12} /><span>{orderFlow?.order_flow.interpretation ?? 'Institutional order-flow context is being loaded.'}</span></div>
             </section>
 
             <section className="panel signal-panel">
