@@ -105,6 +105,31 @@ type OrderFlowAnalysis = {
   market_context: { volatility: string; bias: string; execution_quality: string }
   signals: Array<{ name: string; value: string | number | null; status: 'bullish' | 'neutral' | 'bearish'; interpretation: string }>
 }
+type CalendarAnalysis = {
+  symbol: string
+  provider: string
+  status: string
+  timestamp: string | null
+  risk_bucket: string
+  market_bias: string
+  summary: string
+  next_event: {
+    title: string | null
+    date: string | null
+    impact: string | null
+    country: string | null
+    forecast: string | null
+    previous: string | null
+  } | null
+  upcoming_events: Array<{
+    title: string
+    date: string | null
+    impact: string
+    country: string | null
+    forecast: string | null
+    previous: string | null
+  }>
+}
 
 const demoCandles: Candle[] = Array.from({ length: 42 }, (_, index) => ({
   date: new Date(Date.now() - (41 - index) * 86400000).toISOString().slice(0, 10),
@@ -154,6 +179,7 @@ function App() {
   const [smc, setSmc] = useState<SMCAnalysis | null>(null)
   const [ict, setIct] = useState<ICTAnalysis | null>(null)
   const [orderFlow, setOrderFlow] = useState<OrderFlowAnalysis | null>(null)
+  const [calendarInsight, setCalendarInsight] = useState<CalendarAnalysis | null>(null)
   const [alertPrice, setAlertPrice] = useState('')
   const [alertDirection, setAlertDirection] = useState<'above' | 'below'>('above')
   const [loading, setLoading] = useState(true)
@@ -181,8 +207,9 @@ function App() {
       getJson<PriceAlert[]>('/api/alerts'), getJson<Notification[]>('/api/notifications'),
       getJson<DashboardSummary>('/api/dashboard'), getJson<TechnicalAnalysis>('/api/analysis/technical'),
       getJson<SMCAnalysis>('/api/analysis/smc'), getJson<ICTAnalysis>('/api/analysis/ict'), getJson<OrderFlowAnalysis>('/api/analysis/order-flow'),
+      getJson<CalendarAnalysis>('/api/analysis/calendar'),
     ])
-    const [quoteResult, historyResult, newsResult, calendarResult, signalResult, journalResult, healthResult, heatmapResult, alertsResult, notificationResult, dashboardResult, technicalResult, smcResult, ictResult, orderFlowResult] = results
+    const [quoteResult, historyResult, newsResult, calendarResult, signalResult, journalResult, healthResult, heatmapResult, alertsResult, notificationResult, dashboardResult, technicalResult, smcResult, ictResult, orderFlowResult, calendarInsightResult] = results
     const liveQuote = quoteResult.status === 'fulfilled' ? quoteResult.value : null
     const liveHistory = historyResult.status === 'fulfilled' ? historyResult.value.candles : []
     setLive(Boolean(liveQuote?.status === 'live' && liveHistory.length))
@@ -203,6 +230,7 @@ function App() {
     setSmc(smcResult.status === 'fulfilled' ? smcResult.value : null)
     setIct(ictResult.status === 'fulfilled' ? ictResult.value : null)
     setOrderFlow(orderFlowResult.status === 'fulfilled' ? orderFlowResult.value : null)
+    setCalendarInsight(calendarInsightResult.status === 'fulfilled' ? calendarInsightResult.value : null)
     setLoading(false)
   }
 
@@ -686,6 +714,7 @@ function App() {
 
             <section className="panel calendar-panel">
               <div className="panel-header"><div><div className="panel-kicker">MACRO DESK <span className="dot-separator">·</span> USD WATCH</div><h2>Economic calendar</h2></div><CalendarDays size={16} className="muted-icon" /></div>
+              {calendarInsight && <div className="calendar-intel"><div className="calendar-intel-header"><span className={`bias-pill ${calendarInsight.market_bias.toLowerCase()}`}>{calendarInsight.market_bias}</span><span className="impact-pill">{calendarInsight.risk_bucket} risk</span></div><p>{calendarInsight.summary}</p>{calendarInsight.next_event && <div className="next-event"><strong>{calendarInsight.next_event.title ?? 'Upcoming release'}</strong><small>{calendarInsight.next_event.date ? new Date(calendarInsight.next_event.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'TBA'} · {calendarInsight.next_event.impact?.toUpperCase() ?? 'LOW'} IMPACT</small></div>}</div>}
               {events.length ? <div className="event-list">{events.slice(0, 4).map((event, index) => <div className="event-row" key={`${event.title}-${index}`}><div className="event-time">{event.date ? new Date(event.date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : '--:--'}<small>{event.date ? new Date(event.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) : 'TBA'}</small></div><i className={`impact-mark ${event.impact.toLowerCase()}`} /><div className="event-name"><strong>{event.title}</strong><small>USD · {event.impact.toUpperCase()} IMPACT</small></div><div className="event-consensus"><span>{event.forecast ?? '—'}</span><small>FCST</small></div></div>)}</div> : <div className="calendar-empty"><CalendarDays size={18} /><span>Calendar feed unavailable</span><small>Connect the API for this week’s USD releases.</small></div>}
               <div className="calendar-foot"><span><i className="impact-mark high" /> HIGH</span><span><i className="impact-mark medium" /> MEDIUM</span><span className="calendar-source">Forex Factory · weekly</span></div>
             </section>

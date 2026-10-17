@@ -24,6 +24,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 from backend.config import validate_required_api_keys
 from backend.services import alpha_vantage, finnhub, newsapi
+from backend.services.economic_calendar_intelligence import analyze_calendar_intelligence
 from backend.services.institutional_order_flow import analyze_order_flow
 from backend.services.signal_engine import generate_signal
 from backend.services.ict_concepts import analyze_ict
@@ -893,8 +894,7 @@ async def signals_current() -> dict:
     return signal
 
 
-@app.get("/api/calendar")
-async def economic_calendar() -> dict:
+async def fetch_economic_calendar_data() -> dict:
     global calendar_cache
     now = time.time()
     if calendar_cache and now - calendar_cache[0] < 3600:
@@ -924,6 +924,31 @@ async def economic_calendar() -> dict:
         return result
     except (httpx.HTTPError, ValueError, TypeError) as error:
         return {"events": [], "source": "unavailable", "status": "unavailable", "note": str(error)}
+
+
+@app.get("/api/calendar")
+async def economic_calendar() -> dict:
+    return await fetch_economic_calendar_data()
+
+
+@app.get("/api/analysis/calendar")
+async def calendar_analysis() -> dict:
+    raw = await fetch_economic_calendar_data()
+    events = raw.get("events", [])
+    if not isinstance(events, list):
+        events = []
+    insight = analyze_calendar_intelligence(events)
+    return {
+        "symbol": "XAU/USD",
+        "provider": raw.get("source", "Forex Factory calendar"),
+        "status": raw.get("status", "unavailable"),
+        "timestamp": insight.get("timestamp"),
+        "risk_bucket": insight.get("risk_bucket", "Low"),
+        "market_bias": insight.get("market_bias", "Neutral"),
+        "summary": insight.get("summary", "No economic release data is available right now."),
+        "next_event": insight.get("next_event"),
+        "upcoming_events": insight.get("upcoming_events", []),
+    }
 
 
 @app.get("/api/news")

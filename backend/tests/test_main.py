@@ -382,6 +382,33 @@ def test_heatmap_only_uses_sourced_market_and_calendar_inputs(
     assert "1 high-impact event" in result["factors"][2]["reading"]
 
 
+def test_economic_calendar_intelligence_aggregates_macro_bias(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "fetch_economic_calendar_data",
+        AsyncMock(return_value={
+            "events": [
+                {"title": "US CPI", "country": "USD", "date": "2026-10-18T13:30:00Z", "impact": "high", "forecast": "3.2%", "previous": "3.1%"},
+                {"title": "Fed Statement", "country": "USD", "date": "2026-10-19T18:00:00Z", "impact": "medium", "forecast": "Hold", "previous": "Hold"},
+                {"title": "Initial Jobless Claims", "country": "USD", "date": "2026-10-20T08:30:00Z", "impact": "low", "forecast": "220K", "previous": "225K"},
+            ],
+            "source": "Forex Factory calendar",
+            "status": "live",
+        }),
+    )
+
+    result = client.get("/api/analysis/calendar").json()
+
+    assert result["status"] == "live"
+    assert result["market_bias"] in {"Bullish", "Bearish", "Neutral"}
+    assert result["next_event"]["title"] == "US CPI"
+    assert result["next_event"]["impact"] == "HIGH"
+    assert result["upcoming_events"][0]["title"] in {"US CPI", "Fed Statement", "Initial Jobless Claims"}
+
+
 def test_technical_analysis_returns_indicators_and_summary(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
