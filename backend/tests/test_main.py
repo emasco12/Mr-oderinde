@@ -225,6 +225,28 @@ def test_smc_analysis_returns_market_structure_summary(client: TestClient, monke
     assert "fair_value_gap" in payload
 
 
+def test_ict_analysis_returns_session_and_liquidity_summary(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    candles = [
+        {"date": "2026-01-01", "open": 2330, "high": 2338, "low": 2328, "close": 2334, "volume": 1000},
+        {"date": "2026-01-02", "open": 2334, "high": 2346, "low": 2332, "close": 2342, "volume": 1100},
+        {"date": "2026-01-03", "open": 2342, "high": 2355, "low": 2340, "close": 2350, "volume": 1200},
+        {"date": "2026-01-04", "open": 2350, "high": 2362, "low": 2348, "close": 2358, "volume": 1300},
+        {"date": "2026-01-05", "open": 2358, "high": 2367, "low": 2352, "close": 2362, "volume": 1400},
+    ]
+    monkeypatch.setattr(main.alpha_vantage, "fetch", AsyncMock(return_value={"data": candles}))
+
+    response = client.get("/api/analysis/ict")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "live"
+    assert payload["session_bias"] in {"Bullish", "Bearish", "Neutral"}
+    assert "liquidity" in payload
+    assert "fair_value_gap" in payload
+    assert "displacement" in payload
+    assert "narrative" in payload
+    assert len(payload["indicators"]) >= 4
+
+
 def test_production_startup_requires_secure_auth_cookie(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

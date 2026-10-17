@@ -25,6 +25,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 from backend.config import validate_required_api_keys
 from backend.services import alpha_vantage, finnhub, newsapi
 from backend.services.signal_engine import generate_signal
+from backend.services.ict_concepts import analyze_ict
 from backend.services.smart_money import analyze_smc
 from backend.services.technical_analysis import analyze_market
 
@@ -790,6 +791,52 @@ async def smart_money_concepts() -> dict:
                 "momentum": "Neutral",
                 "liquidity": "Unclear",
             },
+        }
+
+
+@app.get("/api/analysis/ict")
+async def ict_analysis() -> dict:
+    try:
+        data = await alpha_vantage.fetch("GOLD_SILVER_HISTORY", symbol="GOLD", interval="daily")
+        candles = data.get("data", [])
+        if not isinstance(candles, list) or not candles:
+            raise RuntimeError("Alpha Vantage returned no ICT history.")
+        return analyze_ict(candles, provider="Alpha Vantage")
+    except (RuntimeError, httpx.HTTPError, KeyError, TypeError, ValueError, OSError):
+        logger.warning("ICT analysis could not load from Alpha Vantage; returning neutral fallback.")
+        return {
+            "symbol": "XAU/USD",
+            "provider": "unavailable",
+            "status": "unavailable",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "session_bias": "Neutral",
+            "liquidity": {
+                "sweep": "none",
+                "interpretation": "ICT context is temporarily unavailable.",
+            },
+            "fair_value_gap": {
+                "present": False,
+                "direction": None,
+                "size": None,
+                "interpretation": "No fair value gap is available.",
+            },
+            "displacement": {
+                "direction": "neutral",
+                "magnitude": None,
+                "interpretation": "Displacement data is temporarily unavailable.",
+            },
+            "market_regime": {
+                "trend": "Neutral",
+                "volatility": "Low",
+                "institutional_flow": "Balanced",
+            },
+            "narrative": "ICT context is temporarily unavailable.",
+            "indicators": [
+                {"name": "Session Bias", "value": "Neutral", "status": "neutral", "interpretation": "No session bias available.", "unit": "context"},
+                {"name": "Liquidity Sweep", "value": "None", "status": "neutral", "interpretation": "No liquidity sweep available.", "unit": "context"},
+                {"name": "Displacement", "value": None, "status": "neutral", "interpretation": "Displacement data is unavailable.", "unit": "%"},
+                {"name": "FVG", "value": "None", "status": "neutral", "interpretation": "No fair value gap is available.", "unit": "context"},
+            ],
         }
 
 

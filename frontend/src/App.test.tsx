@@ -101,6 +101,21 @@ describe('App', () => {
             risk_context: { trend: 'Bullish', volatility: 'Moderate', momentum: 'Positive', liquidity: 'Premium' },
           })
         }
+        if (path === '/api/analysis/ict') {
+          return makeJsonResponse({
+            symbol: 'XAU/USD',
+            provider: 'Alpha Vantage',
+            status: 'live',
+            timestamp: '2026-10-17T12:00:00Z',
+            session_bias: 'Bullish',
+            liquidity: { sweep: 'bullish', interpretation: 'Buy-side liquidity has been swept and price is holding above the session high.' },
+            fair_value_gap: { present: true, direction: 'bullish', size: 11.4, interpretation: 'A bullish fair value gap remains open.' },
+            displacement: { direction: 'bullish', magnitude: 0.74, interpretation: 'Price is extending with clear directional expansion.' },
+            market_regime: { trend: 'Bullish', volatility: 'Moderate', institutional_flow: 'Bullish' },
+            narrative: 'The market is showing a bullish ICT narrative with clean directional expansion and a valid fair value gap.',
+            indicators: [{ name: 'Session Bias', value: 'Bullish', status: 'bullish', interpretation: 'Current structure remains bullish.' }],
+          })
+        }
 
         return makeJsonResponse({}, 404)
       }),
@@ -141,7 +156,18 @@ describe('App', () => {
       expect(screen.getByText('Smart Money')).toBeInTheDocument()
     })
 
-    expect(screen.getByText('Market structure')).toBeInTheDocument()
-    expect(screen.getByText('Session bias')).toBeInTheDocument()
+    expect(screen.getByText('Smart money structure')).toBeInTheDocument()
+    expect(screen.getAllByText('Session bias').length).toBeGreaterThan(0)
+  })
+
+  it('renders the ICT Concepts panel', async () => {
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('ICT analysis')).toBeInTheDocument()
+    })
+
+    expect(screen.getAllByText('Session bias').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Displacement').length).toBeGreaterThan(0)
   })
 })

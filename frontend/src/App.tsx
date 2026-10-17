@@ -76,6 +76,19 @@ type SMCAnalysis = {
   session_bias: string
   risk_context: { trend: string; volatility: string; momentum: string; liquidity: string }
 }
+type ICTAnalysis = {
+  symbol: string
+  provider: string
+  status: string
+  timestamp: string | null
+  session_bias: string
+  liquidity: { sweep: string; interpretation: string }
+  fair_value_gap: { present: boolean; direction: string | null; size: number | null; interpretation: string }
+  displacement: { direction: string; magnitude: number | null; interpretation: string }
+  market_regime: { trend: string; volatility: string; institutional_flow: string }
+  narrative: string
+  indicators: Array<{ name: string; value: string | number | null; status: 'bullish' | 'neutral' | 'bearish'; interpretation: string; unit?: string }>
+}
 
 const demoCandles: Candle[] = Array.from({ length: 42 }, (_, index) => ({
   date: new Date(Date.now() - (41 - index) * 86400000).toISOString().slice(0, 10),
@@ -123,6 +136,7 @@ function App() {
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null)
   const [technical, setTechnical] = useState<TechnicalAnalysis | null>(null)
   const [smc, setSmc] = useState<SMCAnalysis | null>(null)
+  const [ict, setIct] = useState<ICTAnalysis | null>(null)
   const [alertPrice, setAlertPrice] = useState('')
   const [alertDirection, setAlertDirection] = useState<'above' | 'below'>('above')
   const [loading, setLoading] = useState(true)
@@ -149,9 +163,9 @@ function App() {
       getJson<{ factors: HeatFactor[] }>('/api/market/heatmap'),
       getJson<PriceAlert[]>('/api/alerts'), getJson<Notification[]>('/api/notifications'),
       getJson<DashboardSummary>('/api/dashboard'), getJson<TechnicalAnalysis>('/api/analysis/technical'),
-      getJson<SMCAnalysis>('/api/analysis/smc'),
+      getJson<SMCAnalysis>('/api/analysis/smc'), getJson<ICTAnalysis>('/api/analysis/ict'),
     ])
-    const [quoteResult, historyResult, newsResult, calendarResult, signalResult, journalResult, healthResult, heatmapResult, alertsResult, notificationResult, dashboardResult, technicalResult, smcResult] = results
+    const [quoteResult, historyResult, newsResult, calendarResult, signalResult, journalResult, healthResult, heatmapResult, alertsResult, notificationResult, dashboardResult, technicalResult, smcResult, ictResult] = results
     const liveQuote = quoteResult.status === 'fulfilled' ? quoteResult.value : null
     const liveHistory = historyResult.status === 'fulfilled' ? historyResult.value.candles : []
     setLive(Boolean(liveQuote?.status === 'live' && liveHistory.length))
@@ -170,6 +184,7 @@ function App() {
     setDashboard(dashboardResult.status === 'fulfilled' ? dashboardResult.value : null)
     setTechnical(technicalResult.status === 'fulfilled' ? technicalResult.value : null)
     setSmc(smcResult.status === 'fulfilled' ? smcResult.value : null)
+    setIct(ictResult.status === 'fulfilled' ? ictResult.value : null)
     setLoading(false)
   }
 
@@ -526,6 +541,38 @@ function App() {
                   <small>{smc?.risk_context.volatility ?? 'Volatility unavailable'} · {smc?.risk_context.liquidity ?? 'Liquidity unavailable'}</small>
                 </div>
               </div>
+            </section>
+
+            <section className="panel ict-panel" aria-label="ICT concepts">
+              <div className="panel-header"><div><div className="panel-kicker">ICT CONCEPTS <span className="dot-separator">·</span> XAU/USD</div><h2>ICT analysis</h2></div><div className="signal-icon"><Gauge size={17} /></div></div>
+              <div className="smc-grid">
+                <div className="smc-card">
+                  <span>Session bias</span>
+                  <strong>{ict?.session_bias ?? 'Neutral'}</strong>
+                  <small>{ict?.market_regime.trend ?? 'Trend unavailable'}</small>
+                </div>
+                <div className="smc-card">
+                  <span>Liquidity</span>
+                  <strong>{ict?.liquidity.sweep ? ict.liquidity.sweep.toUpperCase() : 'NONE'}</strong>
+                  <small>{ict?.liquidity.interpretation ?? 'Liquidity context unavailable.'}</small>
+                </div>
+                <div className="smc-card">
+                  <span>Displacement</span>
+                  <strong>{ict?.displacement.direction ? ict.displacement.direction.toUpperCase() : 'NEUTRAL'}</strong>
+                  <small>{ict?.displacement.interpretation ?? 'Displacement unavailable.'}</small>
+                </div>
+                <div className="smc-card">
+                  <span>FVG</span>
+                  <strong>{ict?.fair_value_gap.present ? (ict.fair_value_gap.direction ?? 'Bullish').toUpperCase() : 'NONE'}</strong>
+                  <small>{ict?.fair_value_gap.interpretation ?? 'Fair value gap unavailable.'}</small>
+                </div>
+                <div className="smc-card">
+                  <span>Institutional flow</span>
+                  <strong>{ict?.market_regime.institutional_flow ?? 'Balanced'}</strong>
+                  <small>{ict?.market_regime.volatility ?? 'Volatility unavailable'}</small>
+                </div>
+              </div>
+              <div className="signal-disclaimer"><Sparkles size={12} /><span>{ict?.narrative ?? 'ICT context is being loaded.'}</span></div>
             </section>
 
             <section className="panel signal-panel">
