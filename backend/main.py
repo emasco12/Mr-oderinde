@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import secrets
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -57,6 +59,9 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(512))
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    password_reset_token_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    password_reset_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -93,22 +98,35 @@ def run_database_migrations() -> None:
             """
         ))
 
-        migration_name = "add_user_id_to_journal_entries"
-        already_applied = connection.execute(
-            text("SELECT 1 FROM schema_migrations WHERE name = :name LIMIT 1"),
-            {"name": migration_name},
-        ).fetchone()
-        if already_applied is None and "user_id" not in {column["name"] for column in inspect(engine).get_columns("journal_entries")}:
-            connection.execute(text("ALTER TABLE journal_entries ADD COLUMN user_id INTEGER REFERENCES users(id)"))
+        def apply_migration(migration_name: str, apply_sql: callable) -> None:
+            already_applied = connection.execute(
+                text("SELECT 1 FROM schema_migrations WHERE name = :name LIMIT 1"),
+                {"name": migration_name},
+            ).fetchone()
+            if already_applied is not None:
+                return
+            apply_sql(connection)
             connection.execute(
                 text("INSERT INTO schema_migrations (name) VALUES (:name)"),
                 {"name": migration_name},
             )
-        elif already_applied is None:
-            connection.execute(
-                text("INSERT INTO schema_migrations (name) VALUES (:name)"),
-                {"name": migration_name},
-            )
+
+        def add_user_id_migration(conn) -> None:
+            if "user_id" in {column["name"] for column in inspect(engine).get_columns("journal_entries")}:
+                return
+            conn.execute(text("ALTER TABLE journal_entries ADD COLUMN user_id INTEGER REFERENCES users(id)"))
+
+        def add_reset_fields_migration(conn) -> None:
+            columns = {column["name"] for column in inspect(engine).get_columns("users")}
+            if "email_verified" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN email_verified BOOLEAN NOT NULL DEFAULT 0"))
+            if "password_reset_token_hash" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN password_reset_token_hash VARCHAR(128)"))
+            if "password_reset_expires_at" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN password_reset_expires_at DATETIME"))
+
+        apply_migration("add_user_id_to_journal_entries", add_user_id_migration)
+        apply_migration("add_password_reset_fields_to_users", add_reset_fields_migration)
 
 
 Base.metadata.create_all(bind=engine)
@@ -220,7 +238,19 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
 
 def serialize_user(user: User) -> dict:
-    return {"id": user.id, "email": user.email, "created_at": user.created_at.isoformat()}
+    return {
+        "id": user.id,
+        "email": user.email,
+        "email_verified": user.email_verified,
+        "created_at": user.created_at.isoformat(),
+    }
+
+
+def issue_password_reset_token(user: User) -> str:
+    token = secrets.token_urlsafe(32)
+    user.password_reset_token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    user.password_reset_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    return token
 
 
 def enforce_auth_rate_limit(request: Request) -> None:
@@ -282,6 +312,63 @@ def current_user(user: User = Depends(get_current_user)) -> dict:
 @app.post("/api/auth/logout", status_code=204)
 def logout(response: Response) -> None:
     response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true", samesite="strict")
+
+
+@app.post("/api/auth/request-password-reset")
+def request_password_reset(
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    email = str(payload.get("email", "")).strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="An email address is required.")
+
+    user = db.scalar(select(User).where(User.email == email))
+    if user is not None:
+        token = issue_password_reset_token(user)
+        db.commit()
+        if os.getenv("APP_ENV", "development").lower() == "development":
+            return {"message": "If that account exists, a reset code has been sent.", "reset_token": token}
+    return {"message": "If that account exists, a reset code has been sent."}
+
+
+@app.post("/api/auth/reset-password")
+def reset_password(
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    email = str(payload.get("email", "")).strip().lower()
+    raw_token = str(payload.get("token", "")).strip()
+    new_password = str(payload.get("new_password", "")).strip()
+
+    if not email or not raw_token or len(new_password) < 12:
+        raise HTTPException(status_code=400, detail="A valid email, reset code, and new password are required.")
+
+    user = db.scalar(select(User).where(User.email == email))
+    if user is None:
+        raise HTTPException(status_code=400, detail="That reset code is invalid or has expired.")
+    if user.password_reset_token_hash is None or user.password_reset_expires_at is None:
+        raise HTTPException(status_code=400, detail="That reset code is invalid or has expired.")
+    expires_at = user.password_reset_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    else:
+        expires_at = expires_at.astimezone(timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        user.password_reset_token_hash = None
+        user.password_reset_expires_at = None
+        db.commit()
+        raise HTTPException(status_code=400, detail="That reset code is invalid or has expired.")
+
+    candidate_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    if not secrets.compare_digest(user.password_reset_token_hash, candidate_hash):
+        raise HTTPException(status_code=400, detail="That reset code is invalid or has expired.")
+
+    user.password_hash = password_hasher.hash(new_password)
+    user.password_reset_token_hash = None
+    user.password_reset_expires_at = None
+    db.commit()
+    return {"message": "Password updated successfully."}
 
 
 def score_headline(text_value: str) -> tuple[float, str, str]:
