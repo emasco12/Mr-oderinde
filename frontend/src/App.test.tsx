@@ -79,6 +79,22 @@ describe('App', () => {
             upcoming_events: [{ title: 'US CPI', date: '2026-10-18T13:30:00Z', impact: 'HIGH', country: 'USD', forecast: '3.2%', previous: '3.1%' }],
           })
         }
+        if (path === '/api/ai/decision') {
+          return makeJsonResponse({
+            status: 'live',
+            decision: 'bullish',
+            score: 18.5,
+            confidence: 82,
+            narrative: 'Bullish confluence is forming across price, trend structure, and macro drivers.',
+            drivers: [
+              { label: 'Signal', value: 'BUY', detail: 'The technical signal stack is favoring upside continuation.' },
+              { label: 'Technical structure', value: 'Bullish', detail: 'The technical engine is constructive.' },
+            ],
+            watch_points: ['Monitor trend continuation above the short-term moving average band.', 'Watch volatility and risk appetite for confirmation.'],
+            timestamp: '2026-10-17T12:00:00Z',
+            provider: 'Alpha Vantage + Analytics',
+          })
+        }
         if (path === '/api/signals/current') {
           return makeJsonResponse({ status: 'live', signal: 'BUY', confidence: 72, entry: 2345.67, stop_loss: 2320.0, take_profit: [2368.0, 2390.0, 2415.0], risk_reward: '1:2.1', quality: 'High', reasons: [{ indicator: 'EMA 20', value: 2338.12, interpretation: 'Price is trading above the short-term EMA.' }], note: 'Signals are analytical estimates generated from market data and technical indicators. They are not financial advice and do not guarantee future market performance.' })
         }
@@ -192,6 +208,22 @@ describe('App', () => {
       expect(screen.getAllByText(/BULLISH/i).length).toBeGreaterThan(0)
     })
     expect(screen.getByText(/Headline momentum is skewed toward gold-supportive catalysts/i)).toBeInTheDocument()
+  })
+
+  it('renders the AI decision engine panel', async () => {
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Decision synthesis')).toBeInTheDocument()
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('AI DECISION ENGINE')).toBeInTheDocument()
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText(/Bullish confluence is forming across price, trend structure, and macro drivers/i)).toBeInTheDocument()
+    })
   })
 
   it('allows a user to verify their email address', async () => {

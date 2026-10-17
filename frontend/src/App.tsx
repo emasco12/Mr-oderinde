@@ -36,6 +36,14 @@ type Quote = {
 }
 type Candle = { date: string; close: number }
 type NewsItem = { title: string; url: string; published_at: string; source: string; bias?: string; impact?: string; sentiment_score?: number }
+type NewsIntelligence = {
+  status: string
+  source: string
+  sentiment: { score: number; bias: 'bullish' | 'bearish' | 'neutral'; article_count: number; source?: string; method?: string }
+  prediction: { direction: 'bullish' | 'bearish' | 'neutral'; probability: number; confidence: 'low' | 'moderate' | 'high'; rationale: string }
+  headline_focus?: string | null
+  timestamp?: string | null
+}
 type EventItem = { title: string; date: string | null; impact: string; forecast?: string | null; previous?: string | null }
 type JournalEntry = { id: number; side: 'BUY' | 'SELL'; entry_price: number; exit_price: number | null; quantity_ounces: number; thesis: string; created_at: string; pnl: number | null }
 type SignalReason = { indicator: string; value: number | null; interpretation: string }
@@ -130,6 +138,17 @@ type CalendarAnalysis = {
     previous: string | null
   }>
 }
+type DecisionEngineResult = {
+  status: string
+  decision: 'bullish' | 'bearish' | 'neutral'
+  score: number
+  confidence: number
+  narrative: string
+  drivers: Array<{ label: string; value: string; detail: string }>
+  watch_points: string[]
+  timestamp: string | null
+  provider: string | null
+}
 
 const demoCandles: Candle[] = Array.from({ length: 42 }, (_, index) => ({
   date: new Date(Date.now() - (41 - index) * 86400000).toISOString().slice(0, 10),
@@ -164,6 +183,7 @@ function App() {
   const [quote, setQuote] = useState<Quote | null>(null)
   const [candles, setCandles] = useState<Candle[]>([])
   const [news, setNews] = useState<NewsItem[]>([])
+  const [newsIntelligence, setNewsIntelligence] = useState<NewsIntelligence | null>(null)
   const [events, setEvents] = useState<EventItem[]>([])
   const [signal, setSignal] = useState<Signal | null>(null)
   const [signalExpanded, setSignalExpanded] = useState(true)
@@ -180,6 +200,7 @@ function App() {
   const [ict, setIct] = useState<ICTAnalysis | null>(null)
   const [orderFlow, setOrderFlow] = useState<OrderFlowAnalysis | null>(null)
   const [calendarInsight, setCalendarInsight] = useState<CalendarAnalysis | null>(null)
+  const [decisionEngine, setDecisionEngine] = useState<DecisionEngineResult | null>(null)
   const [alertPrice, setAlertPrice] = useState('')
   const [alertDirection, setAlertDirection] = useState<'above' | 'below'>('above')
   const [loading, setLoading] = useState(true)
@@ -200,22 +221,23 @@ function App() {
     setLoading(true)
     const results = await Promise.allSettled([
       getJson<Quote>('/api/market/gold'), getJson<{ candles: Candle[] }>('/api/market/history'),
-      getJson<{ items: NewsItem[] }>('/api/news'), getJson<{ events: EventItem[] }>('/api/calendar'),
+      getJson<{ items: NewsItem[] }>('/api/news'), getJson<NewsIntelligence>('/api/news/intelligence'), getJson<{ events: EventItem[] }>('/api/calendar'),
       getJson<Signal>('/api/signals/current'), getJson<JournalEntry[]>('/api/journal'),
       getJson<ProviderHealth>('/api/health'),
       getJson<{ factors: HeatFactor[] }>('/api/market/heatmap'),
       getJson<PriceAlert[]>('/api/alerts'), getJson<Notification[]>('/api/notifications'),
       getJson<DashboardSummary>('/api/dashboard'), getJson<TechnicalAnalysis>('/api/analysis/technical'),
       getJson<SMCAnalysis>('/api/analysis/smc'), getJson<ICTAnalysis>('/api/analysis/ict'), getJson<OrderFlowAnalysis>('/api/analysis/order-flow'),
-      getJson<CalendarAnalysis>('/api/analysis/calendar'),
+      getJson<CalendarAnalysis>('/api/analysis/calendar'), getJson<DecisionEngineResult>('/api/ai/decision'),
     ])
-    const [quoteResult, historyResult, newsResult, calendarResult, signalResult, journalResult, healthResult, heatmapResult, alertsResult, notificationResult, dashboardResult, technicalResult, smcResult, ictResult, orderFlowResult, calendarInsightResult] = results
+    const [quoteResult, historyResult, newsResult, newsIntelligenceResult, calendarResult, signalResult, journalResult, healthResult, heatmapResult, alertsResult, notificationResult, dashboardResult, technicalResult, smcResult, ictResult, orderFlowResult, calendarInsightResult, decisionResult] = results
     const liveQuote = quoteResult.status === 'fulfilled' ? quoteResult.value : null
     const liveHistory = historyResult.status === 'fulfilled' ? historyResult.value.candles : []
     setLive(Boolean(liveQuote?.status === 'live' && liveHistory.length))
     setQuote(liveQuote?.price != null ? liveQuote : DEMO ? { price: 4341.82, status: 'demo', source: 'Simulated preview', updated_at: null } : liveQuote)
     setCandles(liveHistory.length ? liveHistory : DEMO ? demoCandles : [])
     setNews(newsResult.status === 'fulfilled' && newsResult.value.items.length ? newsResult.value.items : DEMO ? demoNews : [])
+    setNewsIntelligence(newsIntelligenceResult.status === 'fulfilled' ? newsIntelligenceResult.value : null)
     setEvents(calendarResult.status === 'fulfilled' ? calendarResult.value.events : [])
     const nextSignal = signalResult.status === 'fulfilled' ? signalResult.value : null
     setSignal(nextSignal && nextSignal.signal !== 'WAIT' ? nextSignal : DEMO ? { signal: 'BUY', confidence: 72, method: 'Simulated trend preview', note: 'Signals are analytical estimates generated from market data and technical indicators. They are not financial advice and do not guarantee future market performance.' } : nextSignal)
@@ -231,6 +253,21 @@ function App() {
     setIct(ictResult.status === 'fulfilled' ? ictResult.value : null)
     setOrderFlow(orderFlowResult.status === 'fulfilled' ? orderFlowResult.value : null)
     setCalendarInsight(calendarInsightResult.status === 'fulfilled' ? calendarInsightResult.value : null)
+    const fallbackDecision: DecisionEngineResult = {
+      status: 'demo',
+      decision: 'bullish',
+      score: 72,
+      confidence: 82,
+      narrative: 'Bullish confluence is forming across price, trend structure, and macro drivers.',
+      drivers: [
+        { label: 'Signal', value: 'BUY', detail: 'Trend and momentum remain constructive.' },
+        { label: 'Macro', value: 'Bullish', detail: 'The broader gold context is supportive.' },
+      ],
+      watch_points: ['Monitor trend continuation above short-term support.', 'Watch for volatility spikes around macro catalysts.'],
+      timestamp: new Date().toISOString(),
+      provider: 'Local heuristic',
+    }
+    setDecisionEngine(decisionResult.status === 'fulfilled' && decisionResult.value ? decisionResult.value : DEMO ? fallbackDecision : null)
     setLoading(false)
   }
 
@@ -697,6 +734,30 @@ function App() {
               </div>
             </section>
 
+            <section className="panel ai-panel" aria-label="AI decision engine">
+              <div className="panel-header"><div><div className="panel-kicker"><span>AI DECISION ENGINE</span> <span className="dot-separator">·</span> XAU/USD</div><h2>Decision synthesis</h2></div><div className="signal-icon"><Sparkles size={17} /></div></div>
+              <div className={`signal-banner ${decisionEngine?.decision === 'bullish' ? 'bullish' : decisionEngine?.decision === 'bearish' ? 'bearish' : 'neutral'}`}><div className="signal-orb"><BrainCircuit size={17} /></div><div><span className="label">AI + MARKET CONTEXT</span><strong>{decisionEngine?.decision ? decisionEngine.decision.toUpperCase() : 'NEUTRAL'}</strong></div><span className="signal-conf">{decisionEngine?.confidence ?? 0}%<small>CONF.</small></span></div>
+              <div className="signal-metrics">
+                <div className="signal-metric"><span>Score</span><b>{decisionEngine?.score ?? 0}</b></div>
+                <div className="signal-metric"><span>Confidence</span><b>{decisionEngine?.confidence ?? 0}%</b></div>
+                <div className="signal-metric"><span>Provider</span><b>{decisionEngine?.provider ?? 'Local heuristic'}</b></div>
+                <div className="signal-metric"><span>Updated</span><b>{decisionEngine?.timestamp ? new Date(decisionEngine.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : '—'}</b></div>
+              </div>
+              <p className="decision-narrative">{decisionEngine?.narrative ?? 'The AI decision layer is loading.'}</p>
+              <div className="decision-split">
+                <div className="decision-drivers">
+                  <strong>Key drivers</strong>
+                  {(decisionEngine?.drivers ?? []).length ? (
+                    <ul>{decisionEngine?.drivers.map(driver => <li key={`${driver.label}-${driver.value}`}><span>{driver.label}</span><b>{driver.value}</b><small>{driver.detail}</small></li>)}</ul>
+                  ) : <p className="signal-empty">Awaiting driver data.</p>}
+                </div>
+                <div className="decision-drivers">
+                  <strong>Watch points</strong>
+                  <ul>{(decisionEngine?.watch_points ?? []).map(item => <li key={item}><span>Watch</span><small>{item}</small></li>)}</ul>
+                </div>
+              </div>
+            </section>
+
             <section className="panel heat-panel">
               <div className="panel-header"><div><div className="panel-kicker">MACRO LENS <span className="dot-separator">·</span> GOLD DRIVERS</div><h2>Driver heat map</h2></div><button className="text-button" title="Market driver estimates"><Globe2 size={14} /></button></div>
               <div className="heat-subhead"><span>FACTOR</span><span>GOLD BIAS</span><span>READING</span></div>
@@ -709,9 +770,9 @@ function App() {
               <div className="panel-header"><div><div className="panel-kicker">SIGNAL SCAN <span className="dot-separator">·</span> LAST 72H</div><h2>News &amp; impact</h2></div><span className="live-tag"><i /> {live ? 'LIVE FEED' : 'PREVIEW'}</span></div>
               {analysis && <div className="analysis-note"><button className="close-analysis" onClick={() => setAnalysis(null)} aria-label="Close analysis"><X size={13} /></button><div className="analysis-title"><BrainCircuit size={14} /> IMPACT ASSESSMENT <span className={`bias-pill ${analysis.bias.toLowerCase()}`}>{analysis.bias}</span><span className="impact-pill">{analysis.impact} impact</span></div><p>{analysis.rationale}</p></div>}
               <div className="news-list">{news.slice(0, 4).map((item, index) => <article className="news-item" key={`${item.title}-${index}`}><div className="news-timeline"><span className={index === 0 ? 'timeline-now' : ''} />{index < Math.min(news.length, 4) - 1 && <i />}</div><div className="news-copy"><div className="news-source">{item.source || 'Market news'} <span>·</span> {item.published_at ? new Date(item.published_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) + ' UTC' : 'RECENT'}</div><a href={item.url} target="_blank" rel="noreferrer" className="news-title">{item.title} {item.url !== '#' && <ExternalLink size={11} />}</a><div className="news-tags"><span className={`bias-pill ${(item.bias ?? 'watch').toLowerCase()}`}>{item.bias ?? 'Monitor'}</span><span className={`impact-text ${(item.impact ?? 'low').toLowerCase()}`}>{item.impact ?? 'Review'}</span><button className="analyze-button" onClick={() => void analyze(item)} disabled={analyzing === item.title}>{analyzing === item.title ? <LoaderCircle size={11} className="spin" /> : <BrainCircuit size={11} />} ANALYZE</button></div></div></article>)}</div>
+              {newsIntelligence && <div className="news-intelligence-card"><div className="news-intelligence-header"><span className={`bias-pill ${newsIntelligence.sentiment.bias.toLowerCase()}`}>{newsIntelligence.sentiment.bias}</span><span className="impact-pill">{newsIntelligence.prediction.probability}% probability</span></div><div className="news-intelligence-body"><strong>{newsIntelligence.prediction.direction.toUpperCase()} OUTLOOK</strong><p>{newsIntelligence.prediction.rationale}</p><small>{newsIntelligence.headline_focus ? `Primary driver: ${newsIntelligence.headline_focus}` : 'No headline focus available.'}</small></div></div>}
               <div className="panel-link"><span>Headlines provide context, not trade instructions.</span><button onClick={() => void refresh()}>REFRESH <RefreshCw size={11} /></button></div>
             </section>
-
             <section className="panel calendar-panel">
               <div className="panel-header"><div><div className="panel-kicker">MACRO DESK <span className="dot-separator">·</span> USD WATCH</div><h2>Economic calendar</h2></div><CalendarDays size={16} className="muted-icon" /></div>
               {calendarInsight && <div className="calendar-intel"><div className="calendar-intel-header"><span className={`bias-pill ${calendarInsight.market_bias.toLowerCase()}`}>{calendarInsight.market_bias}</span><span className="impact-pill">{calendarInsight.risk_bucket} risk</span></div><p>{calendarInsight.summary}</p>{calendarInsight.next_event && <div className="next-event"><strong>{calendarInsight.next_event.title ?? 'Upcoming release'}</strong><small>{calendarInsight.next_event.date ? new Date(calendarInsight.next_event.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'TBA'} · {calendarInsight.next_event.impact?.toUpperCase() ?? 'LOW'} IMPACT</small></div>}</div>}

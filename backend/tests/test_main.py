@@ -409,6 +409,48 @@ def test_economic_calendar_intelligence_aggregates_macro_bias(
     assert result["upcoming_events"][0]["title"] in {"US CPI", "Fed Statement", "Initial Jobless Claims"}
 
 
+def test_news_intelligence_predicts_bullish_outcome_for_supportive_headlines(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main.newsapi,
+        "gold_headlines",
+        AsyncMock(return_value={
+            "articles": [
+                {"title": "Gold gains as inflation fears intensify", "source": {"name": "Reuters"}, "publishedAt": "2026-10-17T11:00:00Z"},
+                {"title": "Fed rate cut bets support safe haven demand", "source": {"name": "Bloomberg"}, "publishedAt": "2026-10-17T10:30:00Z"},
+                {"title": "Dollar strength moderates as yields soften", "source": {"name": "Reuters"}, "publishedAt": "2026-10-17T09:00:00Z"},
+            ]
+        }),
+    )
+
+    result = client.get("/api/news/intelligence").json()
+
+    assert result["status"] == "live"
+    assert result["sentiment"]["bias"] == "bullish"
+    assert result["prediction"]["direction"] == "bullish"
+    assert result["prediction"]["probability"] >= 50
+    assert result["headline_focus"]
+
+
+def test_news_intelligence_handles_missing_provider_data(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main.newsapi,
+        "gold_headlines",
+        AsyncMock(side_effect=RuntimeError("NewsAPI unavailable")),
+    )
+
+    result = client.get("/api/news/intelligence").json()
+
+    assert result["status"] == "unavailable"
+    assert result["sentiment"]["bias"] == "neutral"
+    assert result["prediction"]["direction"] == "neutral"
+
+
 def test_technical_analysis_returns_indicators_and_summary(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -597,3 +639,137 @@ def test_signal_engine_handles_unavailable_provider_gracefully(
     assert result["status"] in {"unavailable", "live"}
     assert result["signal"] in {"HOLD", "BUY", "SELL"}
     assert "note" in result
+
+
+def test_ai_decision_engine_synthesizes_bullish_confluence(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "gold_quote",
+        AsyncMock(return_value={
+            "symbol": "XAU/USD",
+            "price": 2360.0,
+            "status": "live",
+            "source": "Alpha Vantage",
+            "change_percent": 1.8,
+        }),
+    )
+    monkeypatch.setattr(
+        main,
+        "technical_analysis",
+        AsyncMock(return_value={
+            "status": "live",
+            "provider": "Alpha Vantage",
+            "summary": {"overall_bias": "bullish", "overall_score": 76, "trend_strength": "strong", "volatility": "moderate", "momentum": "positive", "quality": "high"},
+            "indicators": [
+                {"name": "EMA 20", "value": 2348.0},
+                {"name": "EMA 50", "value": 2335.0},
+                {"name": "RSI (14)", "value": 61.0},
+                {"name": "MACD", "value": 3.4},
+                {"name": "VWAP", "value": 2341.0},
+                {"name": "ATR", "value": 12.0},
+            ],
+        }),
+    )
+    monkeypatch.setattr(
+        main,
+        "news_intelligence",
+        AsyncMock(return_value={
+            "status": "live",
+            "source": "NewsAPI",
+            "sentiment": {"score": 0.52, "bias": "bullish", "article_count": 3, "source": "NewsAPI", "method": "headline scoring"},
+            "prediction": {"direction": "bullish", "probability": 72, "confidence": "high", "rationale": "Gold demand remains strong."},
+            "headline_focus": "Gold demand remains strong",
+            "timestamp": "2026-10-17T12:00:00Z",
+        }),
+    )
+    monkeypatch.setattr(
+        main,
+        "calendar_analysis",
+        AsyncMock(return_value={
+            "symbol": "XAU/USD",
+            "provider": "Forex Factory calendar",
+            "status": "live",
+            "timestamp": "2026-10-17T12:00:00Z",
+            "risk_bucket": "High",
+            "market_bias": "Bullish",
+            "summary": "Macro catalysts are supportive of gold.",
+            "next_event": {"title": "US CPI", "date": "2026-10-18T13:30:00Z"},
+            "upcoming_events": [],
+        }),
+    )
+
+    response = client.get("/api/ai/decision")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["status"] == "live"
+    assert payload["decision"] == "bullish"
+    assert 0 <= payload["confidence"] <= 100
+    assert "narrative" in payload
+    assert payload["drivers"]
+
+
+def test_ai_decision_engine_handles_missing_data_gracefully(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "gold_quote",
+        AsyncMock(return_value={
+            "symbol": "XAU/USD",
+            "price": None,
+            "status": "unavailable",
+            "source": "unavailable",
+            "change_percent": None,
+        }),
+    )
+    monkeypatch.setattr(
+        main,
+        "technical_analysis",
+        AsyncMock(return_value={
+            "status": "unavailable",
+            "provider": "unavailable",
+            "summary": {"overall_bias": "neutral", "overall_score": 50, "trend_strength": "neutral", "volatility": "low", "momentum": "neutral", "quality": "limited"},
+            "indicators": [],
+        }),
+    )
+    monkeypatch.setattr(
+        main,
+        "news_intelligence",
+        AsyncMock(return_value={
+            "status": "unavailable",
+            "source": "unavailable",
+            "sentiment": {"score": 0, "bias": "neutral", "article_count": 0, "source": "unavailable", "method": "No headlines available."},
+            "prediction": {"direction": "neutral", "probability": 0, "confidence": "low", "rationale": "No data."},
+            "headline_focus": None,
+            "timestamp": None,
+        }),
+    )
+    monkeypatch.setattr(
+        main,
+        "calendar_analysis",
+        AsyncMock(return_value={
+            "symbol": "XAU/USD",
+            "provider": "unavailable",
+            "status": "unavailable",
+            "timestamp": None,
+            "risk_bucket": "Low",
+            "market_bias": "Neutral",
+            "summary": "No macro data available.",
+            "next_event": None,
+            "upcoming_events": [],
+        }),
+    )
+
+    response = client.get("/api/ai/decision")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["status"] in {"live", "unavailable"}
+    assert payload["decision"] in {"bullish", "bearish", "neutral"}
+    assert 0 <= payload["confidence"] <= 100
+    assert "narrative" in payload

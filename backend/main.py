@@ -24,8 +24,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 from backend.config import validate_required_api_keys
 from backend.services import alpha_vantage, finnhub, newsapi
+from backend.services.ai_decision_engine import generate_ai_decision
 from backend.services.economic_calendar_intelligence import analyze_calendar_intelligence
 from backend.services.institutional_order_flow import analyze_order_flow
+from backend.services.news_intelligence import analyze_news_intelligence
 from backend.services.signal_engine import generate_signal
 from backend.services.ict_concepts import analyze_ict
 from backend.services.smart_money import analyze_smc
@@ -894,6 +896,52 @@ async def signals_current() -> dict:
     return signal
 
 
+@app.get("/api/ai/decision")
+async def ai_decision() -> dict:
+    try:
+        quote = await gold_quote()
+        technical = await technical_analysis()
+        news = await news_intelligence()
+        calendar = await calendar_analysis()
+        provider_status = {
+            "Alpha Vantage": {"status": "available" if quote.get("source") == "Alpha Vantage" else "unavailable"},
+            "NewsAPI": {"status": "available" if news.get("status") == "live" else "unavailable"},
+            "Finnhub": {"status": "available" if quote.get("source") == "Finnhub" else "unavailable"},
+        }
+        signal = generate_signal(
+            quote=quote,
+            technical=technical,
+            market_tone="bullish" if (quote.get("change_percent") or 0) >= 0 else "bearish",
+            volatility=technical.get("summary", {}).get("volatility"),
+            momentum=technical.get("summary", {}).get("momentum"),
+            provider_status=provider_status,
+        )
+        return generate_ai_decision(
+            quote=quote,
+            technical=technical,
+            signal=signal,
+            news=news,
+            calendar=calendar,
+            provider_status=provider_status,
+        )
+    except Exception as error:  # pragma: no cover - defensive fallback
+        logger.warning("AI decision generation failed: %s", error)
+        return {
+            "status": "unavailable",
+            "decision": "neutral",
+            "score": 0.0,
+            "confidence": 0,
+            "narrative": "The AI decision layer is temporarily unavailable, so the market posture remains neutral.",
+            "drivers": [],
+            "watch_points": [
+                "Wait for clean technical and macro confirmation before taking a directional view.",
+                "Reassess the setup when live market data becomes available again.",
+            ],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "provider": "Unavailable",
+        }
+
+
 async def fetch_economic_calendar_data() -> dict:
     global calendar_cache
     now = time.time()
@@ -951,11 +999,10 @@ async def calendar_analysis() -> dict:
     }
 
 
-@app.get("/api/news")
-async def gold_news() -> dict:
+async def _fetch_news_payload(force_refresh: bool = False) -> dict:
     global news_cache
     now = time.time()
-    if news_cache and now - news_cache[0] < 3600:
+    if not force_refresh and news_cache and now - news_cache[0] < 3600:
         return news_cache[1]
     try:
         data = await newsapi.gold_headlines()
@@ -980,33 +1027,71 @@ async def gold_news() -> dict:
             if isinstance(article, dict)
         ]
         result = {"items": items, "source": "NewsAPI", "status": "live"}
-        news_cache = (now, result)
+        if not force_refresh:
+            news_cache = (now, result)
         return result
     except (RuntimeError, httpx.HTTPError, KeyError, ValueError, TypeError) as error:
-        return {"items": [], "source": "unavailable", "status": "unavailable", "note": str(error)}
+        result = {"items": [], "source": "unavailable", "status": "unavailable", "note": str(error)}
+        if not force_refresh:
+            news_cache = (now, result)
+        return result
+
+
+@app.get("/api/news")
+async def gold_news() -> dict:
+    return await _fetch_news_payload()
 
 
 @app.get("/api/news/sentiment")
 async def news_sentiment() -> dict:
-    news = await gold_news()
-    items = news["items"]
+    news = await _fetch_news_payload(force_refresh=True)
+    items = news.get("items", [])
     if not items:
         return {
             "score": 0,
             "bias": "neutral",
             "article_count": 0,
-            "source": news["source"],
-            "status": news["status"],
+            "source": news.get("source", "unavailable"),
+            "status": news.get("status", "unavailable"),
             "note": news.get("note", "No headlines are available for sentiment analysis."),
         }
-    score = sum(item["sentiment_score"] for item in items) / len(items)
+    insight = analyze_news_intelligence(items)
     return {
-        "score": round(score, 3),
-        "bias": "bullish" if score > 0.1 else "bearish" if score < -0.1 else "neutral",
-        "article_count": len(items),
-        "source": news["source"],
-        "status": news["status"],
-        "method": "Transparent local keyword scoring; not investment advice.",
+        "score": insight["sentiment"]["score"],
+        "bias": insight["sentiment"]["bias"],
+        "article_count": insight["sentiment"]["article_count"],
+        "source": news.get("source", insight["sentiment"].get("source", "unavailable")),
+        "status": news.get("status", insight["status"]),
+        "method": insight["sentiment"]["method"],
+        "prediction": insight["prediction"],
+        "headline_focus": insight.get("headline_focus"),
+        "timestamp": insight.get("timestamp"),
+    }
+
+
+@app.get("/api/news/intelligence")
+async def news_intelligence() -> dict:
+    news = await _fetch_news_payload(force_refresh=True)
+    items = news.get("items", [])
+    insight = analyze_news_intelligence(items)
+    return {
+        "status": news.get("status", insight.get("status", "unavailable")),
+        "source": news.get("source", "unavailable"),
+        "sentiment": insight.get("sentiment", {
+            "score": 0,
+            "bias": "neutral",
+            "article_count": 0,
+            "source": "unavailable",
+            "method": "No market headlines available.",
+        }),
+        "prediction": insight.get("prediction", {
+            "direction": "neutral",
+            "probability": 0,
+            "confidence": "low",
+            "rationale": "No gold news is currently available.",
+        }),
+        "headline_focus": insight.get("headline_focus"),
+        "timestamp": insight.get("timestamp"),
     }
 
 
