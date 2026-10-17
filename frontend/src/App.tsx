@@ -29,7 +29,23 @@ type Candle = { date: string; close: number }
 type NewsItem = { title: string; url: string; published_at: string; source: string; bias?: string; impact?: string; sentiment_score?: number }
 type EventItem = { title: string; date: string | null; impact: string; forecast?: string | null; previous?: string | null }
 type JournalEntry = { id: number; side: 'BUY' | 'SELL'; entry_price: number; exit_price: number | null; quantity_ounces: number; thesis: string; created_at: string; pnl: number | null }
-type Signal = { signal: string; confidence: number; method?: string; note?: string }
+type SignalReason = { indicator: string; value: number | null; interpretation: string }
+type Signal = {
+  status?: string
+  signal: 'BUY' | 'SELL' | 'HOLD' | 'WAIT'
+  confidence: number
+  entry?: number | null
+  stop_loss?: number | null
+  take_profit?: number[]
+  risk_reward?: string
+  trend?: string
+  quality?: string
+  reasons?: SignalReason[]
+  method?: string
+  note?: string
+  timestamp?: string | null
+  provider?: string | null
+}
 type ProviderHealth = { warnings: string[]; providers?: Record<string, { status: 'available' | 'unavailable'; warning?: string | null }> }
 type User = { id: number; email: string }
 type HeatFactor = { name: string; ticker: string; score: number; bias: string; reading: string; source: string }
@@ -75,6 +91,7 @@ function App() {
   const [news, setNews] = useState<NewsItem[]>([])
   const [events, setEvents] = useState<EventItem[]>([])
   const [signal, setSignal] = useState<Signal | null>(null)
+  const [signalExpanded, setSignalExpanded] = useState(true)
   const [journal, setJournal] = useState<JournalEntry[]>([])
   const [live, setLive] = useState(false)
   const [providerWarnings, setProviderWarnings] = useState<string[]>([])
@@ -102,7 +119,7 @@ function App() {
     const results = await Promise.allSettled([
       getJson<Quote>('/api/market/gold'), getJson<{ candles: Candle[] }>('/api/market/history'),
       getJson<{ items: NewsItem[] }>('/api/news'), getJson<{ events: EventItem[] }>('/api/calendar'),
-      getJson<Signal>('/api/signals'), getJson<JournalEntry[]>('/api/journal'),
+      getJson<Signal>('/api/signals/current'), getJson<JournalEntry[]>('/api/journal'),
       getJson<ProviderHealth>('/api/health'),
       getJson<{ factors: HeatFactor[] }>('/api/market/heatmap'),
       getJson<PriceAlert[]>('/api/alerts'), getJson<Notification[]>('/api/notifications'),
@@ -116,7 +133,8 @@ function App() {
     setCandles(liveHistory.length ? liveHistory : DEMO ? demoCandles : [])
     setNews(newsResult.status === 'fulfilled' && newsResult.value.items.length ? newsResult.value.items : DEMO ? demoNews : [])
     setEvents(calendarResult.status === 'fulfilled' ? calendarResult.value.events : [])
-    setSignal(signalResult.status === 'fulfilled' && signalResult.value.signal !== 'WAIT' ? signalResult.value : DEMO ? { signal: 'BUY', confidence: 72, method: 'Simulated trend preview' } : signalResult.status === 'fulfilled' ? signalResult.value : null)
+    const nextSignal = signalResult.status === 'fulfilled' ? signalResult.value : null
+    setSignal(nextSignal && nextSignal.signal !== 'WAIT' ? nextSignal : DEMO ? { signal: 'BUY', confidence: 72, method: 'Simulated trend preview', note: 'Signals are analytical estimates generated from market data and technical indicators. They are not financial advice and do not guarantee future market performance.' } : nextSignal)
     setJournal(journalResult.status === 'fulfilled' ? journalResult.value : JSON.parse(localStorage.getItem(`aurum-journal:${user?.id}`) ?? '[]') as JournalEntry[])
     setProviderWarnings(healthResult.status === 'fulfilled' ? healthResult.value.warnings : ['Provider health check could not be completed.'])
     setProviderStatus(healthResult.status === 'fulfilled' ? (healthResult.value.providers ?? {}) : {})
@@ -393,10 +411,36 @@ function App() {
 
             <section className="panel signal-panel">
               <div className="panel-header"><div><div className="panel-kicker">QUANT DESK <span className="dot-separator">·</span> 01</div><h2>Signal monitor</h2></div><div className="signal-icon"><Crosshair size={17} /></div></div>
-              <div className={`signal-banner ${signal?.signal === 'BUY' ? 'bullish' : signal?.signal === 'SELL' ? 'bearish' : ''}`}><div className="signal-orb"><Activity size={17} /></div><div><span className="label">TREND + MOMENTUM</span><strong>{signal?.signal ?? 'WAIT'}</strong></div><span className="signal-conf">{signal?.confidence ?? 0}%<small>CONF.</small></span></div>
+              <div className={`signal-banner ${signal?.signal === 'BUY' ? 'bullish' : signal?.signal === 'SELL' ? 'bearish' : signal?.signal === 'HOLD' ? 'neutral' : ''}`}><div className="signal-orb"><Activity size={17} /></div><div><span className="label">TREND + MOMENTUM</span><strong>{signal?.signal ?? 'WAIT'}</strong></div><span className="signal-conf">{signal?.confidence ?? 0}%<small>CONF.</small></span></div>
               <div className="confidence-line"><span style={{ width: `${signal?.confidence ?? 0}%` }} /></div>
+              <div className="signal-metrics">
+                <div className="signal-metric"><span>Entry</span><b>{signal?.entry ? `$${signal.entry.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : '—'}</b></div>
+                <div className="signal-metric"><span>Stop</span><b>{signal?.stop_loss ? `$${signal.stop_loss.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : '—'}</b></div>
+                <div className="signal-metric"><span>TP1</span><b>{signal?.take_profit && signal.take_profit[0] ? `$${signal.take_profit[0].toLocaleString('en-US', { maximumFractionDigits: 2 })}` : '—'}</b></div>
+                <div className="signal-metric"><span>TP2</span><b>{signal?.take_profit && signal.take_profit[1] ? `$${signal.take_profit[1].toLocaleString('en-US', { maximumFractionDigits: 2 })}` : '—'}</b></div>
+                <div className="signal-metric"><span>TP3</span><b>{signal?.take_profit && signal.take_profit[2] ? `$${signal.take_profit[2].toLocaleString('en-US', { maximumFractionDigits: 2 })}` : '—'}</b></div>
+                <div className="signal-metric"><span>R:R</span><b>{signal?.risk_reward ?? '1:0'}</b></div>
+                <div className="signal-metric"><span>Quality</span><b>{signal?.quality ?? 'Low'}</b></div>
+                <div className="signal-metric"><span>Time</span><b>{signal?.timestamp ? new Date(signal.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : '—'}</b></div>
+              </div>
               <div className="signal-rows"><div><span>Price vs 20D SMA</span><b className={lastPrice > average ? 'positive' : 'negative'}>{lastPrice > average ? 'ABOVE' : 'BELOW'}</b></div><div><span>Daily momentum</span><b className={chartChange >= 0 ? 'positive' : 'negative'}>{chartChange >= 0 ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}{chartChange >= 0 ? '+' : ''}{chartChange.toFixed(2)}%</b></div><div><span>Signal horizon</span><b>SWING · 1D</b></div></div>
-              <div className="signal-disclaimer"><Sparkles size={12} /><span>{signal?.method ?? '20-day SMA + daily momentum'}<br />Rule-based indicator · not investment advice</span></div>
+              <button className="signal-toggle" type="button" onClick={() => setSignalExpanded(value => !value)}>
+                {signalExpanded ? 'Hide rationale' : 'Why this signal?'}
+              </button>
+              {signalExpanded && (
+                <div className="signal-reasons">
+                  <div className="signal-disclaimer"><Sparkles size={12} /><span>{signal?.note ?? 'Signals are analytical estimates generated from market data and technical indicators. They are not financial advice and do not guarantee future market performance.'}</span></div>
+                  {(signal?.reasons ?? []).length ? (
+                    <ul>
+                      {signal?.reasons?.map(reason => (
+                        <li key={`${reason.indicator}-${reason.interpretation}`}>
+                          <strong>{reason.indicator}</strong>: {reason.value != null ? `${reason.value.toFixed(2)}` : '—'} — {reason.interpretation}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : <p className="signal-empty">No signal rationale available.</p>}
+                </div>
+              )}
               <div className="alerts-widget" id="alerts">
                 <div className="alerts-heading"><strong><Bell size={13} /> PRICE ALERTS</strong><span>{dashboard?.active_alerts ?? alerts.filter(item => item.active).length} ACTIVE</span></div>
                 <form className="alert-form" onSubmit={event => void createPriceAlert(event)}>

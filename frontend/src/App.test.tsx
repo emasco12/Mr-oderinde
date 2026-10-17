@@ -43,8 +43,8 @@ describe('App', () => {
         if (path === '/api/calendar') {
           return makeJsonResponse({ events: [{ title: 'US CPI', date: '2026-10-18', impact: 'high' }] })
         }
-        if (path === '/api/signals') {
-          return makeJsonResponse({ signal: 'BUY', confidence: 72 })
+        if (path === '/api/signals/current') {
+          return makeJsonResponse({ status: 'live', signal: 'BUY', confidence: 72, entry: 2345.67, stop_loss: 2320.0, take_profit: [2368.0, 2390.0, 2415.0], risk_reward: '1:2.1', quality: 'High', reasons: [{ indicator: 'EMA 20', value: 2338.12, interpretation: 'Price is trading above the short-term EMA.' }], note: 'Signals are analytical estimates generated from market data and technical indicators. They are not financial advice and do not guarantee future market performance.' })
         }
         if (path === '/api/journal') {
           return makeJsonResponse([])

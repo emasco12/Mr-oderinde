@@ -332,3 +332,153 @@ def test_technical_analysis_fails_gracefully_when_provider_is_unavailable(
     assert result["status"] == "unavailable"
     assert result["summary"]["overall_bias"] == "neutral"
     assert result["indicators"][0]["interpretation"] == "Technical data is temporarily unavailable."
+
+
+def test_signal_engine_generates_buy_signal_when_market_is_bullish(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "gold_quote",
+        AsyncMock(return_value={
+            "symbol": "XAU/USD",
+            "price": 2350,
+            "status": "live",
+            "source": "Alpha Vantage",
+            "change_percent": 1.5,
+        }),
+    )
+    monkeypatch.setattr(
+        main,
+        "technical_analysis",
+        AsyncMock(return_value={
+            "status": "live",
+            "provider": "Alpha Vantage",
+            "summary": {"overall_bias": "bullish", "trend_strength": "strong", "volatility": "moderate", "momentum": "positive"},
+            "indicators": [
+                {"name": "EMA 20", "value": 2320.0},
+                {"name": "EMA 50", "value": 2305.0},
+                {"name": "RSI (14)", "value": 62.0},
+                {"name": "MACD", "value": 10.0},
+                {"name": "VWAP", "value": 2310.0},
+                {"name": "ATR", "value": 12.0},
+            ],
+        }),
+    )
+
+    result = client.get("/api/signals/current").json()
+
+    assert result["status"] == "live"
+    assert result["signal"] == "BUY"
+    assert 0 <= result["confidence"] <= 100
+    assert result["entry"] == 2350.0
+    assert result["take_profit"][0] > result["entry"]
+    assert len(result["reasons"]) >= 1
+    assert result["reasons"][0]["indicator"] in {"EMA 20", "EMA 50", "RSI (14)", "MACD", "VWAP", "ATR"}
+
+
+def test_signal_engine_generates_sell_signal_when_market_is_bearish(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "gold_quote",
+        AsyncMock(return_value={
+            "symbol": "XAU/USD",
+            "price": 2330,
+            "status": "live",
+            "source": "Alpha Vantage",
+            "change_percent": -1.4,
+        }),
+    )
+    monkeypatch.setattr(
+        main,
+        "technical_analysis",
+        AsyncMock(return_value={
+            "status": "live",
+            "provider": "Alpha Vantage",
+            "summary": {"overall_bias": "bearish", "trend_strength": "weak", "volatility": "moderate", "momentum": "negative"},
+            "indicators": [
+                {"name": "EMA 20", "value": 2360.0},
+                {"name": "EMA 50", "value": 2355.0},
+                {"name": "RSI (14)", "value": 39.0},
+                {"name": "MACD", "value": -8.0},
+                {"name": "VWAP", "value": 2360.0},
+                {"name": "ATR", "value": 18.0},
+            ],
+        }),
+    )
+
+    result = client.get("/api/signals/current").json()
+
+    assert result["status"] == "live"
+    assert result["signal"] == "SELL"
+    assert result["take_profit"][0] < result["entry"]
+
+
+def test_signal_engine_uses_hold_when_data_is_missing(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "gold_quote",
+        AsyncMock(return_value={
+            "symbol": "XAU/USD",
+            "price": None,
+            "status": "unavailable",
+            "source": "unavailable",
+            "change_percent": None,
+        }),
+    )
+    monkeypatch.setattr(
+        main,
+        "technical_analysis",
+        AsyncMock(return_value={
+            "status": "unavailable",
+            "provider": "unavailable",
+            "summary": {"overall_bias": "neutral", "trend_strength": "neutral", "volatility": "low", "momentum": "neutral"},
+            "indicators": [],
+        }),
+    )
+
+    result = client.get("/api/signals/current").json()
+
+    assert result["signal"] == "HOLD"
+    assert result["confidence"] == 0
+    assert result["status"] in {"unavailable", "live"}
+
+
+def test_signal_engine_handles_unavailable_provider_gracefully(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "gold_quote",
+        AsyncMock(return_value={
+            "symbol": "XAU/USD",
+            "price": 2348.0,
+            "status": "live",
+            "source": "Finnhub",
+            "change_percent": 0,
+        }),
+    )
+    monkeypatch.setattr(
+        main,
+        "technical_analysis",
+        AsyncMock(return_value={
+            "status": "unavailable",
+            "provider": "unavailable",
+            "summary": {"overall_bias": "neutral", "trend_strength": "neutral", "volatility": "low", "momentum": "neutral"},
+            "indicators": [],
+        }),
+    )
+
+    result = client.get("/api/signals/current").json()
+
+    assert result["status"] in {"unavailable", "live"}
+    assert result["signal"] in {"HOLD", "BUY", "SELL"}
+    assert "note" in result

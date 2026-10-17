@@ -24,6 +24,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 from backend.config import validate_required_api_keys
 from backend.services import alpha_vantage, finnhub, newsapi
+from backend.services.signal_engine import generate_signal
 from backend.services.technical_analysis import analyze_market
 
 
@@ -674,6 +675,24 @@ async def technical_analysis() -> dict:
                 {"name": "Stochastic RSI", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "%"},
             ],
         }
+
+
+@app.get("/api/signals/current")
+async def signals_current() -> dict:
+    quote = await gold_quote()
+    technical = await technical_analysis()
+    market_tone = "bullish" if (quote.get("change_percent") or 0) >= 0 else "bearish"
+    provider_status = {"Alpha Vantage": {"status": "available" if quote.get("source") == "Alpha Vantage" else "unavailable"}, "NewsAPI": {"status": "available"}, "Finnhub": {"status": "unavailable" if quote.get("source") == "unavailable" else "available"}}
+    signal = generate_signal(
+        quote=quote,
+        technical=technical,
+        market_tone=market_tone,
+        volatility=technical.get("summary", {}).get("volatility"),
+        momentum=technical.get("summary", {}).get("momentum"),
+        provider_status=provider_status,
+    )
+    signal["status"] = "live" if signal.get("signal") != "HOLD" or quote.get("status") == "live" else "unavailable"
+    return signal
 
 
 @app.get("/api/calendar")
