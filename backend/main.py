@@ -82,10 +82,37 @@ class Notification(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-Base.metadata.create_all(bind=engine)
-if "user_id" not in {column["name"] for column in inspect(engine).get_columns("journal_entries")}:
+def run_database_migrations() -> None:
     with engine.begin() as connection:
-        connection.execute(text("ALTER TABLE journal_entries ADD COLUMN user_id INTEGER REFERENCES users(id)"))
+        connection.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        ))
+
+        migration_name = "add_user_id_to_journal_entries"
+        already_applied = connection.execute(
+            text("SELECT 1 FROM schema_migrations WHERE name = :name LIMIT 1"),
+            {"name": migration_name},
+        ).fetchone()
+        if already_applied is None and "user_id" not in {column["name"] for column in inspect(engine).get_columns("journal_entries")}:
+            connection.execute(text("ALTER TABLE journal_entries ADD COLUMN user_id INTEGER REFERENCES users(id)"))
+            connection.execute(
+                text("INSERT INTO schema_migrations (name) VALUES (:name)"),
+                {"name": migration_name},
+            )
+        elif already_applied is None:
+            connection.execute(
+                text("INSERT INTO schema_migrations (name) VALUES (:name)"),
+                {"name": migration_name},
+            )
+
+
+Base.metadata.create_all(bind=engine)
+run_database_migrations()
 
 password_hasher = PasswordHash.recommended()
 JWT_ALGORITHM = "HS256"
