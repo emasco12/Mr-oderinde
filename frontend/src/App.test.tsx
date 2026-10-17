@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from './App'
@@ -10,8 +10,15 @@ function makeJsonResponse(body: unknown, status = 200) {
   })
 }
 
+class ResizeObserverMock {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
 describe('App', () => {
   beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', ResizeObserverMock)
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -19,7 +26,13 @@ describe('App', () => {
         const path = url.replace('http://localhost:8000', '')
 
         if (path === '/api/auth/me') {
-          return makeJsonResponse({ id: 1, email: 'demo@example.com' })
+          return makeJsonResponse({ id: 1, email: 'demo@example.com', email_verified: false })
+        }
+        if (path === '/api/auth/request-email-verification') {
+          return makeJsonResponse({ message: 'A verification code has been sent to your email.', verification_token: 'demo-verify-code' })
+        }
+        if (path === '/api/auth/verify-email') {
+          return makeJsonResponse({ message: 'Email verified successfully.' })
         }
         if (path === '/api/market/gold') {
           return makeJsonResponse({
@@ -90,5 +103,20 @@ describe('App', () => {
     expect(screen.getByText('Market structure')).toBeInTheDocument()
     expect(screen.getByText('Overall Technical Score')).toBeInTheDocument()
     expect(screen.getByText('Trend Strength')).toBeInTheDocument()
+  })
+
+  it('allows a user to verify their email address', async () => {
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Verify your email')).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: 'demo-verify-code' } })
+    fireEvent.click(screen.getByRole('button', { name: 'VERIFY EMAIL' }))
+
+    await waitFor(() => {
+      expect(screen.queryByText('Verify your email')).not.toBeInTheDocument()
+    })
   })
 })

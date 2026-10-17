@@ -179,6 +179,31 @@ def test_password_reset_flow_updates_credentials(client: TestClient) -> None:
     assert login.status_code == 200
 
 
+def test_email_verification_flow_marks_account_verified(client: TestClient) -> None:
+    email = "verify@example.test"
+    registered = client.post(
+        "/api/auth/register",
+        json={"email": email, "password": "Correct horse battery staple 42"},
+    )
+    assert registered.status_code == 201
+    assert registered.json()["email_verified"] is False
+
+    request = client.post("/api/auth/request-email-verification")
+    assert request.status_code == 200
+    token = request.json()["verification_token"]
+
+    verify = client.post(
+        "/api/auth/verify-email",
+        json={"email": email, "token": token},
+    )
+    assert verify.status_code == 200
+    assert verify.json()["message"] == "Email verified successfully."
+
+    me = client.get("/api/auth/me")
+    assert me.status_code == 200
+    assert me.json()["email_verified"] is True
+
+
 def test_production_startup_requires_secure_auth_cookie(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

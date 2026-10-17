@@ -47,7 +47,7 @@ type Signal = {
   provider?: string | null
 }
 type ProviderHealth = { warnings: string[]; providers?: Record<string, { status: 'available' | 'unavailable'; warning?: string | null }> }
-type User = { id: number; email: string }
+type User = { id: number; email: string; email_verified: boolean }
 type HeatFactor = { name: string; ticker: string; score: number; bias: string; reading: string; source: string }
 type PriceAlert = { id: number; direction: 'above' | 'below'; target_price: number; active: boolean }
 type Notification = { id: number; message: string; read: boolean; created_at: string }
@@ -113,6 +113,9 @@ function App() {
   const [riskResult, setRiskResult] = useState<{ risk_amount: number; position_ounces: number; standard_lots: number } | null>(null)
   const [journalForm, setJournalForm] = useState<{ side: 'BUY' | 'SELL'; entry_price: string; exit_price: string; quantity_ounces: string; thesis: string }>({ side: 'BUY', entry_price: '', exit_price: '', quantity_ounces: '', thesis: '' })
   const [notice, setNotice] = useState('')
+  const [verificationCode, setVerificationCode] = useState('')
+  const [verificationMessage, setVerificationMessage] = useState('')
+  const [verificationLoading, setVerificationLoading] = useState(false)
 
   async function refresh() {
     setLoading(true)
@@ -249,6 +252,48 @@ function App() {
     }
   }
 
+  async function requestEmailVerification() {
+    setVerificationLoading(true)
+    setVerificationMessage('')
+    try {
+      const response = await apiFetch('/api/auth/request-email-verification', { method: 'POST' })
+      const result = await response.json()
+      if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Unable to send verification.')
+      setVerificationCode('')
+      setVerificationMessage('A verification code has been sent. Enter it below to confirm your email.')
+      if (result.verification_token) setVerificationCode(result.verification_token)
+    } catch (error) {
+      setVerificationMessage(error instanceof Error ? error.message : 'Unable to request a verification code.')
+    } finally {
+      setVerificationLoading(false)
+    }
+  }
+
+  async function verifyEmail() {
+    if (!user || !verificationCode.trim()) {
+      setVerificationMessage('Enter the verification code sent to your email address.')
+      return
+    }
+    setVerificationLoading(true)
+    setVerificationMessage('')
+    try {
+      const response = await apiFetch('/api/auth/verify-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: user.email, token: verificationCode.trim() }),
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Verification failed.')
+      setUser(current => current ? { ...current, email_verified: true } : current)
+      setVerificationCode('')
+      setVerificationMessage(result.message ?? 'Email verified successfully.')
+    } catch (error) {
+      setVerificationMessage(error instanceof Error ? error.message : 'Unable to verify your email.')
+    } finally {
+      setVerificationLoading(false)
+    }
+  }
+
   async function signOut() {
     await apiFetch('/api/auth/logout', { method: 'POST' })
     setUser(null)
@@ -322,6 +367,20 @@ function App() {
       </aside>
 
       <main className="workspace">
+        {!user.email_verified ? (
+          <div className="notice-banner" role="status" aria-live="polite">
+            <div>
+              <strong>Verify your email</strong>
+              <span>Confirm your account to unlock the full Aurum experience.</span>
+            </div>
+            <div className="verification-controls">
+              <input aria-label="Verification code" type="text" value={verificationCode} onChange={event => setVerificationCode(event.target.value)} placeholder="Enter code" />
+              <button type="button" className="calculate-button" onClick={() => void verifyEmail()} disabled={verificationLoading}>{verificationLoading ? 'VERIFYING…' : 'VERIFY EMAIL'}</button>
+              <button type="button" className="auth-switch" onClick={() => void requestEmailVerification()} disabled={verificationLoading}>RESEND CODE</button>
+            </div>
+            {verificationMessage ? <small>{verificationMessage}</small> : null}
+          </div>
+        ) : null}
         <header className="topbar">
           <div className="wordmark">AURUM<span>.</span><span className="wordmark-sub">INTELLIGENCE</span></div>
           <nav className="top-nav"><span className="nav-current">Overview</span><span>Markets</span><span>Research</span><span>Journal</span></nav>

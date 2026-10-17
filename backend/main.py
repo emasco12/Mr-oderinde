@@ -62,6 +62,8 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(512))
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    email_verification_token_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    email_verification_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     password_reset_token_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
     password_reset_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -122,6 +124,10 @@ def run_database_migrations() -> None:
             columns = {column["name"] for column in inspect(engine).get_columns("users")}
             if "email_verified" not in columns:
                 conn.execute(text("ALTER TABLE users ADD COLUMN email_verified BOOLEAN NOT NULL DEFAULT 0"))
+            if "email_verification_token_hash" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN email_verification_token_hash VARCHAR(128)"))
+            if "email_verification_expires_at" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN email_verification_expires_at DATETIME"))
             if "password_reset_token_hash" not in columns:
                 conn.execute(text("ALTER TABLE users ADD COLUMN password_reset_token_hash VARCHAR(128)"))
             if "password_reset_expires_at" not in columns:
@@ -248,6 +254,13 @@ def serialize_user(user: User) -> dict:
     }
 
 
+def issue_email_verification_token(user: User) -> str:
+    token = secrets.token_urlsafe(32)
+    user.email_verification_token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    user.email_verification_expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+    return token
+
+
 def issue_password_reset_token(user: User) -> str:
     token = secrets.token_urlsafe(32)
     user.password_reset_token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -314,6 +327,59 @@ def current_user(user: User = Depends(get_current_user)) -> dict:
 @app.post("/api/auth/logout", status_code=204)
 def logout(response: Response) -> None:
     response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true", samesite="strict")
+
+
+@app.post("/api/auth/request-email-verification")
+def request_email_verification(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    if user.email_verified:
+        return {"message": "This email is already verified."}
+
+    token = issue_email_verification_token(user)
+    db.commit()
+    if os.getenv("APP_ENV", "development").lower() == "development":
+        return {"message": "A verification link or code has been sent to your email.", "verification_token": token}
+    return {"message": "A verification link or code has been sent to your email."}
+
+
+@app.post("/api/auth/verify-email")
+def verify_email(
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    email = str(payload.get("email", "")).strip().lower()
+    raw_token = str(payload.get("token", "")).strip()
+    if not email or not raw_token:
+        raise HTTPException(status_code=400, detail="A valid email and verification code are required.")
+
+    user = db.scalar(select(User).where(User.email == email))
+    if user is None:
+        raise HTTPException(status_code=400, detail="That verification code is invalid or has expired.")
+    if user.email_verification_token_hash is None or user.email_verification_expires_at is None:
+        raise HTTPException(status_code=400, detail="That verification code is invalid or has expired.")
+
+    expires_at = user.email_verification_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    else:
+        expires_at = expires_at.astimezone(timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        user.email_verification_token_hash = None
+        user.email_verification_expires_at = None
+        db.commit()
+        raise HTTPException(status_code=400, detail="That verification code is invalid or has expired.")
+
+    candidate_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    if not secrets.compare_digest(user.email_verification_token_hash, candidate_hash):
+        raise HTTPException(status_code=400, detail="That verification code is invalid or has expired.")
+
+    user.email_verified = True
+    user.email_verification_token_hash = None
+    user.email_verification_expires_at = None
+    db.commit()
+    return {"message": "Email verified successfully."}
 
 
 @app.post("/api/auth/request-password-reset")

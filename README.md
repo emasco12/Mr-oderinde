@@ -79,7 +79,7 @@ Start Compose with `APP_ENV=production docker compose up --build`. Do not expose
 - **Risk calculator:** Dollar risk, XAU/USD ounces and standard lots (one lot is assumed to be 100 troy ounces).
 - **Trading journal:** Authenticated, account-scoped SQLite entries and realized P&L. Legacy unowned entries are not exposed to user accounts.
 - **Price alerts and notifications:** In-app alerts are checked when the backend serves a Gold quote, and the signed-in dashboard refreshes feeds every minute. Provider quote caching and free-plan quotas can delay alert evaluation; this is not a guaranteed real-time push service.
-- **Authentication:** Email/password accounts, Argon2 password hashes and seven-day HttpOnly, SameSite=Strict JWT cookies. Production requires secure cookies over HTTPS. Password reset and email verification are not implemented.
+- **Authentication:** Email/password accounts, Argon2 password hashes and seven-day HttpOnly, SameSite=Strict JWT cookies. Production requires secure cookies over HTTPS. Password reset and email verification are implemented for account recovery and validation.
 
 ## Configuration reference
 
