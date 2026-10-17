@@ -12,6 +12,15 @@ import {
 const API = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 const DEMO = import.meta.env.VITE_DEMO_MODE !== 'false'
 
+if (typeof window !== 'undefined' && !('ResizeObserver' in window)) {
+  class ResizeObserverFallback {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  ;(window as typeof window & { ResizeObserver?: typeof ResizeObserverFallback }).ResizeObserver = ResizeObserverFallback
+}
+
 type Quote = {
   price: number | null
   status: string
