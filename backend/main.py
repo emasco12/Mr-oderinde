@@ -25,6 +25,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 from backend.config import validate_required_api_keys
 from backend.services import alpha_vantage, finnhub, newsapi
 from backend.services.signal_engine import generate_signal
+from backend.services.smart_money import analyze_smc
 from backend.services.technical_analysis import analyze_market
 
 
@@ -740,6 +741,55 @@ async def technical_analysis() -> dict:
                 {"name": "VWAP", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
                 {"name": "Stochastic RSI", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "%"},
             ],
+        }
+
+
+@app.get("/api/analysis/smc")
+async def smart_money_concepts() -> dict:
+    try:
+        data = await alpha_vantage.fetch("GOLD_SILVER_HISTORY", symbol="GOLD", interval="daily")
+        candles = data.get("data", [])
+        if not isinstance(candles, list) or not candles:
+            raise RuntimeError("Alpha Vantage returned no SMC history.")
+        return analyze_smc(candles, provider="Alpha Vantage")
+    except (RuntimeError, httpx.HTTPError, KeyError, TypeError, ValueError, OSError):
+        logger.warning("Smart Money Concepts analysis could not load from Alpha Vantage; returning neutral fallback.")
+        return {
+            "symbol": "XAU/USD",
+            "provider": "unavailable",
+            "status": "unavailable",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "market_structure": {
+                "trend": "neutral",
+                "break_of_structure": "No structure available.",
+                "change_of_character": "No character change available.",
+                "swing_high": None,
+                "swing_low": None,
+            },
+            "liquidity": {
+                "sweep": "none",
+                "interpretation": "SMC data is temporarily unavailable.",
+            },
+            "order_block": {
+                "type": "neutral",
+                "top": None,
+                "bottom": None,
+                "strength": "weak",
+                "interpretation": "SMC order block data is unavailable.",
+            },
+            "fair_value_gap": {
+                "present": False,
+                "direction": None,
+                "gap": None,
+                "interpretation": "No fair value gap could be evaluated.",
+            },
+            "session_bias": "Neutral",
+            "risk_context": {
+                "trend": "Neutral",
+                "volatility": "Low",
+                "momentum": "Neutral",
+                "liquidity": "Unclear",
+            },
         }
 
 

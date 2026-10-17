@@ -64,6 +64,18 @@ type DashboardSummary = { trade_count: number; open_positions: number; closed_pn
 type TechnicalIndicator = { name: string; value: number | null; status: 'bullish' | 'neutral' | 'bearish'; interpretation: string; unit?: string }
 type TechnicalSummary = { overall_bias: string; overall_score: number; trend_strength: string; volatility: string; momentum: string; quality: string }
 type TechnicalAnalysis = { symbol: string; provider: string; status: string; timestamp: string | null; summary: TechnicalSummary; indicators: TechnicalIndicator[] }
+type SMCAnalysis = {
+  symbol: string
+  provider: string
+  status: string
+  timestamp: string | null
+  market_structure: { trend: string; break_of_structure: string; change_of_character: string; swing_high: number | null; swing_low: number | null }
+  liquidity: { sweep: string; interpretation: string }
+  order_block: { type: string; top: number | null; bottom: number | null; strength: string; interpretation: string }
+  fair_value_gap: { present: boolean; direction: string | null; gap: number | null; interpretation: string }
+  session_bias: string
+  risk_context: { trend: string; volatility: string; momentum: string; liquidity: string }
+}
 
 const demoCandles: Candle[] = Array.from({ length: 42 }, (_, index) => ({
   date: new Date(Date.now() - (41 - index) * 86400000).toISOString().slice(0, 10),
@@ -110,6 +122,7 @@ function App() {
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null)
   const [technical, setTechnical] = useState<TechnicalAnalysis | null>(null)
+  const [smc, setSmc] = useState<SMCAnalysis | null>(null)
   const [alertPrice, setAlertPrice] = useState('')
   const [alertDirection, setAlertDirection] = useState<'above' | 'below'>('above')
   const [loading, setLoading] = useState(true)
@@ -136,8 +149,9 @@ function App() {
       getJson<{ factors: HeatFactor[] }>('/api/market/heatmap'),
       getJson<PriceAlert[]>('/api/alerts'), getJson<Notification[]>('/api/notifications'),
       getJson<DashboardSummary>('/api/dashboard'), getJson<TechnicalAnalysis>('/api/analysis/technical'),
+      getJson<SMCAnalysis>('/api/analysis/smc'),
     ])
-    const [quoteResult, historyResult, newsResult, calendarResult, signalResult, journalResult, healthResult, heatmapResult, alertsResult, notificationResult, dashboardResult, technicalResult] = results
+    const [quoteResult, historyResult, newsResult, calendarResult, signalResult, journalResult, healthResult, heatmapResult, alertsResult, notificationResult, dashboardResult, technicalResult, smcResult] = results
     const liveQuote = quoteResult.status === 'fulfilled' ? quoteResult.value : null
     const liveHistory = historyResult.status === 'fulfilled' ? historyResult.value.candles : []
     setLive(Boolean(liveQuote?.status === 'live' && liveHistory.length))
@@ -155,6 +169,7 @@ function App() {
     setNotifications(notificationResult.status === 'fulfilled' ? notificationResult.value : [])
     setDashboard(dashboardResult.status === 'fulfilled' ? dashboardResult.value : null)
     setTechnical(technicalResult.status === 'fulfilled' ? technicalResult.value : null)
+    setSmc(smcResult.status === 'fulfilled' ? smcResult.value : null)
     setLoading(false)
   }
 
@@ -475,6 +490,42 @@ function App() {
                 </AreaChart></ResponsiveContainer> : <div className="empty-chart"><Activity size={22} /><span>No live market history</span><small>Configure Alpha Vantage to load the XAU/USD series.</small></div>}
               </div>
               <div className="chart-footer"><span><Clock3 size={12} /> UTC · DAILY CLOSE</span><span>Source: {live ? 'Alpha Vantage' : 'Simulated preview'} <ArrowRight size={11} /></span></div>
+            </section>
+
+            <section className="panel smc-panel" aria-label="Smart Money Concepts">
+              <div className="panel-header"><div><div className="panel-kicker"><span>Smart Money</span> <span className="dot-separator">·</span> XAU/USD</div><h2>Smart money structure</h2></div><div className="signal-icon"><BrainCircuit size={17} /></div></div>
+              <div className="smc-grid">
+                <div className="smc-card">
+                  <span>Trend</span>
+                  <strong>{smc?.market_structure.trend ? smc.market_structure.trend.toUpperCase() : 'NEUTRAL'}</strong>
+                  <small>{smc?.market_structure.break_of_structure ?? 'Structure data unavailable.'}</small>
+                </div>
+                <div className="smc-card">
+                  <span>Session bias</span>
+                  <strong>{smc?.session_bias ?? 'Neutral'}</strong>
+                  <small>{smc?.risk_context.momentum ?? 'Momentum unavailable'}</small>
+                </div>
+                <div className="smc-card">
+                  <span>Liquidity sweep</span>
+                  <strong>{smc?.liquidity.sweep ? smc.liquidity.sweep.toUpperCase() : 'NONE'}</strong>
+                  <small>{smc?.liquidity.interpretation ?? 'Liquidity context unavailable.'}</small>
+                </div>
+                <div className="smc-card">
+                  <span>Order block</span>
+                  <strong>{smc?.order_block.type ? smc.order_block.type.toUpperCase() : 'NEUTRAL'}</strong>
+                  <small>{smc?.order_block.interpretation ?? 'Order block context unavailable.'}</small>
+                </div>
+                <div className="smc-card">
+                  <span>FVG</span>
+                  <strong>{smc?.fair_value_gap.present ? (smc.fair_value_gap.direction ?? 'Bullish').toUpperCase() : 'NONE'}</strong>
+                  <small>{smc?.fair_value_gap.interpretation ?? 'No fair value gap available.'}</small>
+                </div>
+                <div className="smc-card">
+                  <span>Risk context</span>
+                  <strong>{smc?.risk_context.trend ?? 'Neutral'}</strong>
+                  <small>{smc?.risk_context.volatility ?? 'Volatility unavailable'} · {smc?.risk_context.liquidity ?? 'Liquidity unavailable'}</small>
+                </div>
+              </div>
             </section>
 
             <section className="panel signal-panel">

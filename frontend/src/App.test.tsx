@@ -87,6 +87,20 @@ describe('App', () => {
             indicators: [{ name: 'EMA 20', value: 2337.39, status: 'bullish', interpretation: 'Price is strengthened above the short-term EMA.', unit: 'USD' }],
           })
         }
+        if (path === '/api/analysis/smc') {
+          return makeJsonResponse({
+            symbol: 'XAU/USD',
+            provider: 'Alpha Vantage',
+            status: 'live',
+            timestamp: '2026-10-17T12:00:00Z',
+            market_structure: { trend: 'bullish', break_of_structure: 'Bullish break of structure remains intact above recent local highs.', change_of_character: 'Momentum is constructive and the short-term trend is still positive.', swing_high: 2350, swing_low: 2320 },
+            liquidity: { sweep: 'bullish', interpretation: 'Buy-side liquidity has been absorbed and price is holding above the recent premium range.' },
+            order_block: { type: 'bullish', top: 2348, bottom: 2336, strength: 'strong', interpretation: 'Bullish order block remains active.' },
+            fair_value_gap: { present: true, direction: 'bullish', gap: 12.6, interpretation: 'A bullish fair value gap is in play.' },
+            session_bias: 'Bullish',
+            risk_context: { trend: 'Bullish', volatility: 'Moderate', momentum: 'Positive', liquidity: 'Premium' },
+          })
+        }
 
         return makeJsonResponse({}, 404)
       }),
@@ -118,5 +132,16 @@ describe('App', () => {
     await waitFor(() => {
       expect(screen.queryByText('Verify your email')).not.toBeInTheDocument()
     })
+  })
+
+  it('renders the Smart Money Concepts panel', async () => {
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Smart Money')).toBeInTheDocument()
+    })
+
+    expect(screen.getByText('Market structure')).toBeInTheDocument()
+    expect(screen.getByText('Session bias')).toBeInTheDocument()
   })
 })
