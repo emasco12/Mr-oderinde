@@ -18,7 +18,7 @@ if (typeof window !== 'undefined' && !('ResizeObserver' in window)) {
     unobserve() {}
     disconnect() {}
   }
-  ;(window as typeof window & { ResizeObserver?: typeof ResizeObserverFallback }).ResizeObserver = ResizeObserverFallback
+  (window as any).ResizeObserver = ResizeObserverFallback
 }
 
 type Quote = {
