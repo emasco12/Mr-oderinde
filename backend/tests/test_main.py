@@ -72,9 +72,14 @@ def test_risk_calculation(client: TestClient) -> None:
         json={"account_balance": 25000, "risk_percent": 1, "entry_price": 4340, "stop_price": 4300},
     )
     assert response.status_code == 200
-    assert response.json()["risk_amount"] == 250
-    assert response.json()["position_ounces"] == 6.25
-    assert response.json()["standard_lots"] == 0.0625
+    body = response.json()
+    assert body["risk_amount"] == 250
+    assert body["position_ounces"] == 6.25
+    assert body["standard_lots"] == 0.0625
+    assert body["risk_status"] == "Controlled"
+    assert body["risk_reward_ratio"] == 2.0
+    assert body["position_size_rating"] == "Conservative"
+    assert "trade risks" in body["interpretation"].lower()
 
 
 def test_risk_rejects_zero_stop_distance(client: TestClient) -> None:

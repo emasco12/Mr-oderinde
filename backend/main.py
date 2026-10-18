@@ -28,6 +28,7 @@ from backend.services.ai_decision_engine import generate_ai_decision
 from backend.services.economic_calendar_intelligence import analyze_calendar_intelligence
 from backend.services.institutional_order_flow import analyze_order_flow
 from backend.services.news_intelligence import analyze_news_intelligence
+from backend.services.risk_management import calculate_risk_management
 from backend.services.signal_engine import generate_signal
 from backend.services.ict_concepts import analyze_ict
 from backend.services.smart_money import analyze_smc
@@ -1182,17 +1183,29 @@ class RiskRequest(BaseModel):
 
 @app.post("/api/risk")
 def calculate_risk(request: RiskRequest) -> dict:
-    distance = abs(request.entry_price - request.stop_price)
-    if distance == 0:
-        raise HTTPException(status_code=422, detail="Entry and stop prices must differ.")
-    risk_amount = request.account_balance * request.risk_percent / 100
-    ounces = risk_amount / distance
+    try:
+        risk_profile = calculate_risk_management(
+            account_balance=request.account_balance,
+            risk_percent=request.risk_percent,
+            entry_price=request.entry_price,
+            stop_price=request.stop_price,
+            reward_ratio=2.0,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     return {
-        "risk_amount": round(risk_amount, 2),
-        "stop_distance": round(distance, 2),
-        "position_ounces": round(ounces, 4),
-        "standard_lots": round(ounces / 100, 4),
-        "assumption": "1 standard XAU/USD lot = 100 troy ounces",
+        "risk_amount": risk_profile["risk_amount"],
+        "stop_distance": risk_profile["stop_distance"],
+        "position_ounces": risk_profile["position_ounces"],
+        "standard_lots": risk_profile["standard_lots"],
+        "risk_status": risk_profile["risk_status"],
+        "risk_reward_ratio": risk_profile["risk_reward_ratio"],
+        "target_price": risk_profile["target_price"],
+        "risk_budget_percent": risk_profile["risk_budget_percent"],
+        "position_size_rating": risk_profile["position_size_rating"],
+        "interpretation": risk_profile["interpretation"],
+        "assumption": risk_profile["assumption"],
     }
 
 

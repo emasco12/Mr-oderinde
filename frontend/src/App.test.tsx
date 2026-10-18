@@ -104,6 +104,9 @@ describe('App', () => {
         if (path === '/api/health') {
           return makeJsonResponse({ warnings: [], providers: { 'Alpha Vantage': { status: 'available', priority: 'primary', warning: null }, NewsAPI: { status: 'available', priority: 'primary', warning: null }, Finnhub: { status: 'unavailable', priority: 'secondary', warning: 'Finnhub unavailable' } } })
         }
+        if (path === '/api/risk') {
+          return makeJsonResponse({ risk_amount: 250, stop_distance: 40, position_ounces: 6.25, standard_lots: 0.0625, risk_status: 'Controlled', risk_reward_ratio: 2.0, target_price: 4420, risk_budget_percent: 1, position_size_rating: 'Conservative', interpretation: 'This trade risks 1.00% of the account while preserving a disciplined 2:1 reward profile.' })
+        }
         if (path === '/api/market/heatmap') {
           return makeJsonResponse({ factors: [{ name: 'US Dollar', ticker: 'DXY', score: 42, bias: 'Bearish', reading: 'soft', source: 'Macro' }] })
         }
@@ -224,6 +227,21 @@ describe('App', () => {
     await waitFor(() => {
       expect(screen.getByText(/Bullish confluence is forming across price, trend structure, and macro drivers/i)).toBeInTheDocument()
     })
+  })
+
+  it('renders the risk management suite panel', async () => {
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Risk management suite')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'CALCULATE POSITION' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Controlled')).toBeInTheDocument()
+    })
+    expect(screen.getByText('1:2.0')).toBeInTheDocument()
   })
 
   it('allows a user to verify their email address', async () => {

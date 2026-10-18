@@ -1,4 +1,4 @@
-# AI Gold Intelligence Platform — Product Roadmap
+git push origin main# AI Gold Intelligence Platform — Product Roadmap
 
 ## Vision
 Aurum is evolving from a working research dashboard into a production-grade XAU/USD intelligence platform for traders, analysts, and researchers. The platform combines live market data, technical analysis, macro context, and decision support while remaining transparent about data quality, model assumptions, and provider limitations.
