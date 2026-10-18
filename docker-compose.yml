@@ -1,0 +1,30 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - ./backend/.env
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: sqlite:////data/gold_intelligence.db
+    expose:
+      - "8000"
+    volumes:
+      - journal-data:/data
+    restart: unless-stopped
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
+        VITE_DEMO_MODE: ${VITE_DEMO_MODE:-true}
+    ports:
+      - "5173:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  journal-data:

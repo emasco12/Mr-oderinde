@@ -1,0 +1,1454 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import logging
+import os
+import secrets
+import time
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from threading import Lock
+from typing import AsyncIterator, Generator, Literal
+
+import httpx
+import jwt
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from pwdlib import PasswordHash
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, create_engine, func, inspect, select, text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+from backend.config import validate_required_api_keys
+from backend.services import alpha_vantage, finnhub, newsapi
+from backend.services.ai_decision_engine import generate_ai_decision
+from backend.services.economic_calendar_intelligence import analyze_calendar_intelligence
+from backend.services.institutional_order_flow import analyze_order_flow
+from backend.services.news_intelligence import analyze_news_intelligence
+from backend.services.risk_management import calculate_risk_management
+from backend.services.signal_engine import generate_signal
+from backend.services.ict_concepts import analyze_ict
+from backend.services.smart_money import analyze_smc
+from backend.services.technical_analysis import analyze_market
+
+
+logger = logging.getLogger(__name__)
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./gold_intelligence.db")
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
+)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class JournalEntry(Base):
+    __tablename__ = "journal_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    side: Mapped[str] = mapped_column(String(4))
+    entry_price: Mapped[float] = mapped_column(Float)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quantity_ounces: Mapped[float] = mapped_column(Float)
+    thesis: Mapped[str] = mapped_column(String(1000), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(512))
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    email_verification_token_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    email_verification_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    password_reset_token_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    password_reset_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class PriceAlert(Base):
+    __tablename__ = "price_alerts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    direction: Mapped[str] = mapped_column(String(8))
+    target_price: Mapped[float] = mapped_column(Float)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    alert_id: Mapped[int | None] = mapped_column(ForeignKey("price_alerts.id", ondelete="SET NULL"), nullable=True)
+    message: Mapped[str] = mapped_column(String(500))
+    read: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def run_database_migrations() -> None:
+    with engine.begin() as connection:
+        connection.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        ))
+
+        def apply_migration(migration_name: str, apply_sql: callable) -> None:
+            already_applied = connection.execute(
+                text("SELECT 1 FROM schema_migrations WHERE name = :name LIMIT 1"),
+                {"name": migration_name},
+            ).fetchone()
+            if already_applied is not None:
+                return
+            apply_sql(connection)
+            connection.execute(
+                text("INSERT INTO schema_migrations (name) VALUES (:name)"),
+                {"name": migration_name},
+            )
+
+        def add_user_id_migration(conn) -> None:
+            if "user_id" in {column["name"] for column in inspect(engine).get_columns("journal_entries")}:
+                return
+            conn.execute(text("ALTER TABLE journal_entries ADD COLUMN user_id INTEGER REFERENCES users(id)"))
+
+        def add_reset_fields_migration(conn) -> None:
+            columns = {column["name"] for column in inspect(engine).get_columns("users")}
+            if "email_verified" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN email_verified BOOLEAN NOT NULL DEFAULT 0"))
+            if "email_verification_token_hash" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN email_verification_token_hash VARCHAR(128)"))
+            if "email_verification_expires_at" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN email_verification_expires_at DATETIME"))
+            if "password_reset_token_hash" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN password_reset_token_hash VARCHAR(128)"))
+            if "password_reset_expires_at" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN password_reset_expires_at DATETIME"))
+
+        apply_migration("add_user_id_to_journal_entries", add_user_id_migration)
+        apply_migration("add_password_reset_fields_to_users", add_reset_fields_migration)
+
+
+Base.metadata.create_all(bind=engine)
+run_database_migrations()
+
+password_hasher = PasswordHash.recommended()
+JWT_ALGORITHM = "HS256"
+SESSION_COOKIE = "aurum_session"
+SESSION_TTL = timedelta(days=7)
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    validate_required_api_keys()
+    if os.getenv("APP_ENV", "development").lower() == "production":
+        if os.getenv("AUTH_COOKIE_SECURE", "false").lower() != "true":
+            raise RuntimeError("AUTH_COOKIE_SECURE must be true in production.")
+        if "*" in os.getenv("CORS_ORIGINS", ""):
+            raise RuntimeError("CORS_ORIGINS must not contain '*' in production.")
+    yield
+
+
+app = FastAPI(title="Gold Intelligence API", version="1.0.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+quote_cache: tuple[float, dict] | None = None
+history_cache: tuple[float, dict] | None = None
+news_cache: tuple[float, dict] | None = None
+provider_health_cache: tuple[float, dict] | None = None
+calendar_cache: tuple[float, dict] | None = None
+auth_attempts: dict[str, deque[float]] = defaultdict(deque)
+auth_attempt_lock = Lock()
+
+
+def get_db() -> Generator[Session, None, None]:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+class AuthRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=320, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    password: str = Field(min_length=12, max_length=128)
+
+
+class JournalCreate(BaseModel):
+    side: str = Field(pattern="^(BUY|SELL)$")
+    entry_price: float = Field(gt=0)
+    exit_price: float | None = Field(default=None, gt=0)
+    quantity_ounces: float = Field(gt=0)
+    thesis: str = Field(default="", max_length=1000)
+
+
+class AlertCreate(BaseModel):
+    direction: str = Field(pattern="^(above|below)$")
+    target_price: float = Field(gt=0)
+
+
+def create_session_token(user: User) -> str:
+    secret = os.environ["JWT_SECRET_KEY"]
+    now = datetime.now(timezone.utc)
+    return jwt.encode(
+        {"sub": str(user.id), "iat": now, "exp": now + SESSION_TTL},
+        secret,
+        algorithm=JWT_ALGORITHM,
+    )
+
+
+def set_session_cookie(response: Response, user: User) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        create_session_token(user),
+        max_age=int(SESSION_TTL.total_seconds()),
+        httponly=True,
+        secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true",
+        samesite="strict",
+        path="/",
+    )
+
+
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    try:
+        payload = jwt.decode(token, os.environ["JWT_SECRET_KEY"], algorithms=[JWT_ALGORITHM])
+        user_id = int(payload["sub"])
+    except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired or invalid. Please sign in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account no longer exists.")
+    return user
+
+
+def serialize_user(user: User) -> dict:
+    return {
+        "id": user.id,
+        "email": user.email,
+        "email_verified": user.email_verified,
+        "created_at": user.created_at.isoformat(),
+    }
+
+
+def issue_email_verification_token(user: User) -> str:
+    token = secrets.token_urlsafe(32)
+    user.email_verification_token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    user.email_verification_expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+    return token
+
+
+def issue_password_reset_token(user: User) -> str:
+    token = secrets.token_urlsafe(32)
+    user.password_reset_token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    user.password_reset_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    return token
+
+
+def enforce_auth_rate_limit(request: Request) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    with auth_attempt_lock:
+        attempts = auth_attempts[client_ip]
+        while attempts and now - attempts[0] > 900:
+            attempts.popleft()
+        if len(attempts) >= 10:
+            raise HTTPException(status_code=429, detail="Too many authentication attempts. Try again later.")
+        attempts.append(now)
+
+
+@app.post("/api/auth/register", status_code=201)
+def register(
+    request: AuthRequest,
+    response: Response,
+    client_request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    enforce_auth_rate_limit(client_request)
+    email = request.email.lower().strip()
+    if db.scalar(select(User).where(User.email == email)):
+        raise HTTPException(status_code=409, detail="An account with that email already exists.")
+    user = User(email=email, password_hash=password_hasher.hash(request.password))
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="An account with that email already exists.") from None
+    db.refresh(user)
+    set_session_cookie(response, user)
+    return serialize_user(user)
+
+
+@app.post("/api/auth/login")
+def login(
+    request: AuthRequest,
+    response: Response,
+    client_request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    enforce_auth_rate_limit(client_request)
+    email = request.email.lower().strip()
+    user = db.scalar(select(User).where(User.email == email))
+    if user is None or not password_hasher.verify(request.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Email or password is incorrect.")
+    set_session_cookie(response, user)
+    return serialize_user(user)
+
+
+@app.get("/api/auth/me")
+def current_user(user: User = Depends(get_current_user)) -> dict:
+    return serialize_user(user)
+
+
+@app.post("/api/auth/logout", status_code=204)
+def logout(response: Response) -> None:
+    response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true", samesite="strict")
+
+
+@app.post("/api/auth/request-email-verification")
+def request_email_verification(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    if user.email_verified:
+        return {"message": "This email is already verified."}
+
+    token = issue_email_verification_token(user)
+    db.commit()
+    if os.getenv("APP_ENV", "development").lower() == "development":
+        return {"message": "A verification link or code has been sent to your email.", "verification_token": token}
+    return {"message": "A verification link or code has been sent to your email."}
+
+
+@app.post("/api/auth/verify-email")
+def verify_email(
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    email = str(payload.get("email", "")).strip().lower()
+    raw_token = str(payload.get("token", "")).strip()
+    if not email or not raw_token:
+        raise HTTPException(status_code=400, detail="A valid email and verification code are required.")
+
+    user = db.scalar(select(User).where(User.email == email))
+    if user is None:
+        raise HTTPException(status_code=400, detail="That verification code is invalid or has expired.")
+    if user.email_verification_token_hash is None or user.email_verification_expires_at is None:
+        raise HTTPException(status_code=400, detail="That verification code is invalid or has expired.")
+
+    expires_at = user.email_verification_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    else:
+        expires_at = expires_at.astimezone(timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        user.email_verification_token_hash = None
+        user.email_verification_expires_at = None
+        db.commit()
+        raise HTTPException(status_code=400, detail="That verification code is invalid or has expired.")
+
+    candidate_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    if not secrets.compare_digest(user.email_verification_token_hash, candidate_hash):
+        raise HTTPException(status_code=400, detail="That verification code is invalid or has expired.")
+
+    user.email_verified = True
+    user.email_verification_token_hash = None
+    user.email_verification_expires_at = None
+    db.commit()
+    return {"message": "Email verified successfully."}
+
+
+@app.post("/api/auth/request-password-reset")
+def request_password_reset(
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    email = str(payload.get("email", "")).strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="An email address is required.")
+
+    user = db.scalar(select(User).where(User.email == email))
+    if user is not None:
+        token = issue_password_reset_token(user)
+        db.commit()
+        if os.getenv("APP_ENV", "development").lower() == "development":
+            return {"message": "If that account exists, a reset code has been sent.", "reset_token": token}
+    return {"message": "If that account exists, a reset code has been sent."}
+
+
+@app.post("/api/auth/reset-password")
+def reset_password(
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    email = str(payload.get("email", "")).strip().lower()
+    raw_token = str(payload.get("token", "")).strip()
+    new_password = str(payload.get("new_password", "")).strip()
+
+    if not email or not raw_token or len(new_password) < 12:
+        raise HTTPException(status_code=400, detail="A valid email, reset code, and new password are required.")
+
+    user = db.scalar(select(User).where(User.email == email))
+    if user is None:
+        raise HTTPException(status_code=400, detail="That reset code is invalid or has expired.")
+    if user.password_reset_token_hash is None or user.password_reset_expires_at is None:
+        raise HTTPException(status_code=400, detail="That reset code is invalid or has expired.")
+    expires_at = user.password_reset_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    else:
+        expires_at = expires_at.astimezone(timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        user.password_reset_token_hash = None
+        user.password_reset_expires_at = None
+        db.commit()
+        raise HTTPException(status_code=400, detail="That reset code is invalid or has expired.")
+
+    candidate_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    if not secrets.compare_digest(user.password_reset_token_hash, candidate_hash):
+        raise HTTPException(status_code=400, detail="That reset code is invalid or has expired.")
+
+    user.password_hash = password_hasher.hash(new_password)
+    user.password_reset_token_hash = None
+    user.password_reset_expires_at = None
+    db.commit()
+    return {"message": "Password updated successfully."}
+
+
+def score_headline(text_value: str) -> tuple[float, str, str]:
+    text_value = text_value.lower()
+    bullish_terms = (
+        "inflation", "war", "conflict", "uncertainty", "safe haven", "rate cut",
+        "dovish", "weak dollar", "recession", "gold rises", "gold gains",
+    )
+    bearish_terms = (
+        "rate hike", "hawkish", "strong dollar", "yields rise", "ceasefire",
+        "risk appetite", "inflation cools", "gold falls", "gold drops",
+    )
+    bullish = sum(term in text_value for term in bullish_terms)
+    bearish = sum(term in text_value for term in bearish_terms)
+    score = (bullish - bearish) / max(bullish + bearish, 1)
+    bias = "bullish" if score > 0 else "bearish" if score < 0 else "neutral"
+    impact = "high" if bullish + bearish >= 2 else "medium" if bullish + bearish else "low"
+    return score, bias, impact
+
+
+def notify_price_alerts(price: float) -> None:
+    try:
+        with SessionLocal() as db:
+            alerts = db.scalars(select(PriceAlert).where(PriceAlert.active.is_(True))).all()
+            for alert in alerts:
+                triggered = price >= alert.target_price if alert.direction == "above" else price <= alert.target_price
+                if triggered:
+                    alert.active = False
+                    db.add(
+                        Notification(
+                            user_id=alert.user_id,
+                            alert_id=alert.id,
+                            message=f"Gold reached ${price:,.2f}, {alert.direction} your ${alert.target_price:,.2f} alert.",
+                        )
+                    )
+            db.commit()
+    except SQLAlchemyError:
+        logger.exception("Failed to evaluate price alerts")
+
+
+def serialize_alert(alert: PriceAlert) -> dict:
+    return {
+        "id": alert.id,
+        "direction": alert.direction,
+        "target_price": alert.target_price,
+        "active": alert.active,
+        "created_at": alert.created_at.isoformat(),
+    }
+
+
+def serialize_notification(notification: Notification) -> dict:
+    return {
+        "id": notification.id,
+        "message": notification.message,
+        "read": notification.read,
+        "created_at": notification.created_at.isoformat(),
+    }
+
+
+def _normalize_market_number(raw_value: object) -> float | None:
+    if raw_value in (None, "", "N/A"):
+        return None
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_quote_fields(payload: dict) -> dict:
+    data = payload.get("Global Quote") if isinstance(payload, dict) and isinstance(payload.get("Global Quote"), dict) else payload
+    if not isinstance(data, dict):
+        return {
+            "open": None,
+            "daily_high": None,
+            "daily_low": None,
+            "previous_close": None,
+            "change_percent": None,
+        }
+
+    open_value = _normalize_market_number(data.get("02. open") or data.get("open"))
+    high_value = _normalize_market_number(data.get("03. high") or data.get("high"))
+    low_value = _normalize_market_number(data.get("04. low") or data.get("low"))
+    previous_close = _normalize_market_number(data.get("08. previous close") or data.get("previous_close"))
+    change_percent = data.get("10. change percent") or data.get("change_percent")
+    price = _normalize_market_number(data.get("05. price") or data.get("price"))
+    if price is None and "price" in payload:
+        price = _normalize_market_number(payload["price"])
+
+    if isinstance(change_percent, str):
+        change_percent = change_percent.replace("%", "").strip()
+    if change_percent is not None:
+        try:
+            change_percent = float(change_percent)
+        except (TypeError, ValueError):
+            change_percent = None
+    elif previous_close and price is not None:
+        change_percent = ((price - previous_close) / previous_close) * 100
+
+    return {
+        "open": open_value,
+        "daily_high": high_value,
+        "daily_low": low_value,
+        "previous_close": previous_close,
+        "change_percent": change_percent,
+        "price": price,
+    }
+
+
+@app.get("/api/health")
+async def health() -> dict:
+    global provider_health_cache
+    now = time.time()
+    if provider_health_cache and now - provider_health_cache[0] < 60:
+        return provider_health_cache[1]
+
+    async def check_provider(name: str, priority: str, check) -> tuple[str, dict]:
+        try:
+            await check()
+            return name, {
+                "status": "available",
+                "priority": priority,
+                "warning": None,
+            }
+        except (RuntimeError, httpx.HTTPError, KeyError, TypeError, ValueError, OSError) as error:
+            warning = f"{name} is unavailable: {error}"
+            logger.warning("%s provider health check failed: %s", name, error)
+            return name, {
+                "status": "unavailable",
+                "priority": priority,
+                "warning": warning,
+            }
+
+    checked = await asyncio.gather(
+        check_provider("Alpha Vantage", "primary", alpha_vantage.health_check),
+        check_provider("NewsAPI", "primary", newsapi.health_check),
+        check_provider("Finnhub", "secondary", finnhub.health_check),
+    )
+    providers = dict(checked)
+    warnings = [provider["warning"] for provider in providers.values() if provider["warning"]]
+    result = {
+        "status": "ok",
+        "service": "gold-intelligence-api",
+        "providers": providers,
+        "warnings": warnings,
+    }
+    provider_health_cache = (now, result)
+    return result
+
+
+@app.get("/api/health/live")
+def liveness() -> dict:
+    return {"status": "ok"}
+
+
+@app.get("/api/market/gold")
+async def gold_quote() -> dict:
+    global quote_cache
+    now = time.time()
+    if quote_cache and now - quote_cache[0] < 5400:
+        logger.info("Serving cached XAU/USD quote from %s", quote_cache[1]["source"])
+        if quote_cache[1]["price"] is not None:
+            notify_price_alerts(quote_cache[1]["price"])
+        return quote_cache[1]
+    try:
+        quote = await alpha_vantage.fetch("GOLD_SILVER_SPOT", symbol="GOLD")
+        quote_fields = _extract_quote_fields(quote)
+        result = {
+            "symbol": "XAU/USD",
+            "price": float(quote_fields.get("price") if quote_fields.get("price") is not None else quote["price"]),
+            "open": quote_fields.get("open"),
+            "daily_high": quote_fields.get("daily_high"),
+            "daily_low": quote_fields.get("daily_low"),
+            "previous_close": quote_fields.get("previous_close"),
+            "change_percent": quote_fields.get("change_percent"),
+            "updated_at": quote.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+            "source": "Alpha Vantage",
+            "status": "live",
+            "note": None,
+        }
+        quote_cache = (now, result)
+        logger.info("Serving XAU/USD quote from Alpha Vantage")
+        notify_price_alerts(result["price"])
+        return result
+    except (RuntimeError, httpx.HTTPError, KeyError, TypeError, ValueError, OSError) as alpha_error:
+        logger.warning("Alpha Vantage quote unavailable: %s", alpha_error)
+        try:
+            quote = await finnhub.quote()
+            result = {
+                "symbol": "XAU/USD",
+                "price": float(quote["c"]),
+                "open": None,
+                "daily_high": None,
+                "daily_low": None,
+                "previous_close": None,
+                "change_percent": None,
+                "updated_at": datetime.fromtimestamp(quote["t"], timezone.utc).isoformat(),
+                "source": "Finnhub",
+                "status": "live",
+                "note": None,
+            }
+            quote_cache = (now, result)
+            logger.info("Serving XAU/USD quote from Finnhub")
+            notify_price_alerts(result["price"])
+            return result
+        except (RuntimeError, httpx.HTTPError, KeyError, TypeError, ValueError, OSError) as finnhub_error:
+            logger.warning("Finnhub quote unavailable: %s", finnhub_error)
+            return {
+                "symbol": "XAU/USD",
+                "price": None,
+                "open": None,
+                "daily_high": None,
+                "daily_low": None,
+                "previous_close": None,
+                "change_percent": None,
+                "updated_at": None,
+                "source": "unavailable",
+                "status": "unavailable",
+                "note": "Gold quote is unavailable from Alpha Vantage and Finnhub.",
+            }
+
+
+@app.get("/api/market/history")
+async def gold_history() -> dict:
+    global history_cache
+    now = time.time()
+    if history_cache and now - history_cache[0] < 86400:
+        logger.info("Serving cached XAU/USD history from %s", history_cache[1]["source"])
+        return history_cache[1]
+    try:
+        data = await alpha_vantage.fetch(
+            "GOLD_SILVER_HISTORY", symbol="GOLD", interval="daily"
+        )
+        candles = [
+            {"date": point["date"], "close": float(point["price"])}
+            for point in sorted(data["data"], key=lambda point: point["date"])
+        ]
+        result = {"candles": candles, "source": "Alpha Vantage", "status": "live"}
+        history_cache = (now, result)
+        logger.info("Serving XAU/USD history from Alpha Vantage")
+        return result
+    except (RuntimeError, httpx.HTTPError, KeyError, TypeError, ValueError, OSError) as alpha_error:
+        logger.warning("Alpha Vantage history unavailable: %s", alpha_error)
+        try:
+            data = await finnhub.daily_candles()
+            candles = [
+                {
+                    "date": datetime.fromtimestamp(timestamp, timezone.utc).date().isoformat(),
+                    "close": float(close),
+                }
+                for timestamp, close in zip(data["t"], data["c"], strict=True)
+            ]
+            result = {"candles": candles, "source": "Finnhub", "status": "live"}
+            history_cache = (now, result)
+            logger.info("Serving XAU/USD history from Finnhub")
+            return result
+        except (RuntimeError, httpx.HTTPError, KeyError, TypeError, ValueError, OSError) as finnhub_error:
+            logger.warning("Finnhub history unavailable: %s", finnhub_error)
+            return {
+                "candles": [],
+                "source": "unavailable",
+                "status": "unavailable",
+                "note": "Gold history is unavailable from Alpha Vantage and Finnhub.",
+            }
+
+
+@app.get("/api/analysis/technical")
+async def technical_analysis() -> dict:
+    try:
+        data = await alpha_vantage.fetch("GOLD_SILVER_HISTORY", symbol="GOLD", interval="daily")
+        candles = data.get("data", [])
+        if not isinstance(candles, list) or not candles:
+            raise RuntimeError("Alpha Vantage returned no gold history.")
+        return analyze_market(candles, provider="Alpha Vantage")
+    except (RuntimeError, httpx.HTTPError, KeyError, TypeError, ValueError, OSError):
+        logger.warning("Technical analysis could not load from Alpha Vantage; falling back to neutral output.")
+        return {
+            "symbol": "XAU/USD",
+            "provider": "unavailable",
+            "status": "unavailable",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "summary": {
+                "overall_bias": "neutral",
+                "overall_score": 0,
+                "trend_strength": "neutral",
+                "volatility": "low",
+                "momentum": "neutral",
+                "quality": "limited",
+            },
+            "indicators": [
+                {"name": "EMA 20", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "EMA 50", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "EMA 200", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "SMA 20", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "RSI (14)", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "%"},
+                {"name": "MACD", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "%"},
+                {"name": "ATR", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "ADX", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "%"},
+                {"name": "Bollinger Upper", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "Bollinger Mid", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "Bollinger Lower", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "VWAP", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "USD"},
+                {"name": "Stochastic RSI", "value": None, "status": "neutral", "interpretation": "Technical data is temporarily unavailable.", "unit": "%"},
+            ],
+        }
+
+
+@app.get("/api/analysis/smc")
+async def smart_money_concepts() -> dict:
+    try:
+        data = await alpha_vantage.fetch("GOLD_SILVER_HISTORY", symbol="GOLD", interval="daily")
+        candles = data.get("data", [])
+        if not isinstance(candles, list) or not candles:
+            raise RuntimeError("Alpha Vantage returned no SMC history.")
+        return analyze_smc(candles, provider="Alpha Vantage")
+    except (RuntimeError, httpx.HTTPError, KeyError, TypeError, ValueError, OSError):
+        logger.warning("Smart Money Concepts analysis could not load from Alpha Vantage; returning neutral fallback.")
+        return {
+            "symbol": "XAU/USD",
+            "provider": "unavailable",
+            "status": "unavailable",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "market_structure": {
+                "trend": "neutral",
+                "break_of_structure": "No structure available.",
+                "change_of_character": "No character change available.",
+                "swing_high": None,
+                "swing_low": None,
+            },
+            "liquidity": {
+                "sweep": "none",
+                "interpretation": "SMC data is temporarily unavailable.",
+            },
+            "order_block": {
+                "type": "neutral",
+                "top": None,
+                "bottom": None,
+                "strength": "weak",
+                "interpretation": "SMC order block data is unavailable.",
+            },
+            "fair_value_gap": {
+                "present": False,
+                "direction": None,
+                "gap": None,
+                "interpretation": "No fair value gap could be evaluated.",
+            },
+            "session_bias": "Neutral",
+            "risk_context": {
+                "trend": "Neutral",
+                "volatility": "Low",
+                "momentum": "Neutral",
+                "liquidity": "Unclear",
+            },
+        }
+
+
+@app.get("/api/analysis/ict")
+async def ict_analysis() -> dict:
+    try:
+        data = await alpha_vantage.fetch("GOLD_SILVER_HISTORY", symbol="GOLD", interval="daily")
+        candles = data.get("data", [])
+        if not isinstance(candles, list) or not candles:
+            raise RuntimeError("Alpha Vantage returned no ICT history.")
+        return analyze_ict(candles, provider="Alpha Vantage")
+    except (RuntimeError, httpx.HTTPError, KeyError, TypeError, ValueError, OSError):
+        logger.warning("ICT analysis could not load from Alpha Vantage; returning neutral fallback.")
+        return {
+            "symbol": "XAU/USD",
+            "provider": "unavailable",
+            "status": "unavailable",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "session_bias": "Neutral",
+            "liquidity": {
+                "sweep": "none",
+                "interpretation": "ICT context is temporarily unavailable.",
+            },
+            "fair_value_gap": {
+                "present": False,
+                "direction": None,
+                "size": None,
+                "interpretation": "No fair value gap is available.",
+            },
+            "displacement": {
+                "direction": "neutral",
+                "magnitude": None,
+                "interpretation": "Displacement data is temporarily unavailable.",
+            },
+            "market_regime": {
+                "trend": "Neutral",
+                "volatility": "Low",
+                "institutional_flow": "Balanced",
+            },
+            "narrative": "ICT context is temporarily unavailable.",
+            "indicators": [
+                {"name": "Session Bias", "value": "Neutral", "status": "neutral", "interpretation": "No session bias available.", "unit": "context"},
+                {"name": "Liquidity Sweep", "value": "None", "status": "neutral", "interpretation": "No liquidity sweep available.", "unit": "context"},
+                {"name": "Displacement", "value": None, "status": "neutral", "interpretation": "Displacement data is unavailable.", "unit": "%"},
+                {"name": "FVG", "value": "None", "status": "neutral", "interpretation": "No fair value gap is available.", "unit": "context"},
+            ],
+        }
+
+
+@app.get("/api/analysis/order-flow")
+async def order_flow_analysis() -> dict:
+    try:
+        data = await alpha_vantage.fetch("GOLD_SILVER_HISTORY", symbol="GOLD", interval="daily")
+        candles = data.get("data", [])
+        if not isinstance(candles, list) or not candles:
+            raise RuntimeError("Alpha Vantage returned no order-flow history.")
+        return analyze_order_flow(candles, provider="Alpha Vantage")
+    except (RuntimeError, httpx.HTTPError, KeyError, TypeError, ValueError, OSError):
+        logger.warning("Institutional order-flow analysis could not load from Alpha Vantage; returning neutral fallback.")
+        return {
+            "symbol": "XAU/USD",
+            "provider": "unavailable",
+            "status": "unavailable",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "order_flow": {
+                "trend": "Neutral",
+                "pressure": "Balanced",
+                "absorption": "Low",
+                "participation": "Low",
+                "imbalance": 0.0,
+                "interpretation": "Institutional order-flow data is temporarily unavailable.",
+            },
+            "market_context": {
+                "volatility": "Low",
+                "bias": "Neutral",
+                "execution_quality": "Limited",
+            },
+            "signals": [
+                {"name": "Pressure", "value": "Neutral", "status": "neutral", "interpretation": "Order-flow context is unavailable."},
+            ],
+        }
+
+
+@app.get("/api/signals/current")
+async def signals_current() -> dict:
+    quote = await gold_quote()
+    technical = await technical_analysis()
+    market_tone = "bullish" if (quote.get("change_percent") or 0) >= 0 else "bearish"
+    provider_status = {"Alpha Vantage": {"status": "available" if quote.get("source") == "Alpha Vantage" else "unavailable"}, "NewsAPI": {"status": "available"}, "Finnhub": {"status": "unavailable" if quote.get("source") == "unavailable" else "available"}}
+    signal = generate_signal(
+        quote=quote,
+        technical=technical,
+        market_tone=market_tone,
+        volatility=technical.get("summary", {}).get("volatility"),
+        momentum=technical.get("summary", {}).get("momentum"),
+        provider_status=provider_status,
+    )
+    signal["status"] = "live" if signal.get("signal") != "HOLD" or quote.get("status") == "live" else "unavailable"
+    return signal
+
+
+@app.get("/api/ai/decision")
+async def ai_decision() -> dict:
+    try:
+        quote = await gold_quote()
+        technical = await technical_analysis()
+        news = await news_intelligence()
+        calendar = await calendar_analysis()
+        provider_status = {
+            "Alpha Vantage": {"status": "available" if quote.get("source") == "Alpha Vantage" else "unavailable"},
+            "NewsAPI": {"status": "available" if news.get("status") == "live" else "unavailable"},
+            "Finnhub": {"status": "available" if quote.get("source") == "Finnhub" else "unavailable"},
+        }
+        signal = generate_signal(
+            quote=quote,
+            technical=technical,
+            market_tone="bullish" if (quote.get("change_percent") or 0) >= 0 else "bearish",
+            volatility=technical.get("summary", {}).get("volatility"),
+            momentum=technical.get("summary", {}).get("momentum"),
+            provider_status=provider_status,
+        )
+        return generate_ai_decision(
+            quote=quote,
+            technical=technical,
+            signal=signal,
+            news=news,
+            calendar=calendar,
+            provider_status=provider_status,
+        )
+    except Exception as error:  # pragma: no cover - defensive fallback
+        logger.warning("AI decision generation failed: %s", error)
+        return {
+            "status": "unavailable",
+            "decision": "neutral",
+            "score": 0.0,
+            "confidence": 0,
+            "narrative": "The AI decision layer is temporarily unavailable, so the market posture remains neutral.",
+            "drivers": [],
+            "watch_points": [
+                "Wait for clean technical and macro confirmation before taking a directional view.",
+                "Reassess the setup when live market data becomes available again.",
+            ],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "provider": "Unavailable",
+        }
+
+
+async def fetch_economic_calendar_data() -> dict:
+    global calendar_cache
+    now = time.time()
+    if calendar_cache and now - calendar_cache[0] < 3600:
+        return calendar_cache[1]
+    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    try:
+        async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "GoldIntelligence/1.0"}) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+        events = response.json()
+        if not isinstance(events, list):
+            raise ValueError("Calendar provider returned an unexpected response.")
+        usd_events = [
+            {
+                "title": event.get("title", "Economic release"),
+                "country": event.get("country", "USD"),
+                "date": event.get("date"),
+                "impact": event.get("impact", ""),
+                "forecast": event.get("forecast"),
+                "previous": event.get("previous"),
+            }
+            for event in events
+            if event.get("country") == "USD"
+        ]
+        result = {"events": usd_events, "source": "Forex Factory calendar", "status": "live"}
+        calendar_cache = (now, result)
+        return result
+    except (httpx.HTTPError, ValueError, TypeError) as error:
+        return {"events": [], "source": "unavailable", "status": "unavailable", "note": str(error)}
+
+
+@app.get("/api/calendar")
+async def economic_calendar() -> dict:
+    return await fetch_economic_calendar_data()
+
+
+@app.get("/api/analysis/calendar")
+async def calendar_analysis() -> dict:
+    raw = await fetch_economic_calendar_data()
+    events = raw.get("events", [])
+    if not isinstance(events, list):
+        events = []
+    insight = analyze_calendar_intelligence(events)
+    return {
+        "symbol": "XAU/USD",
+        "provider": raw.get("source", "Forex Factory calendar"),
+        "status": raw.get("status", "unavailable"),
+        "timestamp": insight.get("timestamp"),
+        "risk_bucket": insight.get("risk_bucket", "Low"),
+        "market_bias": insight.get("market_bias", "Neutral"),
+        "summary": insight.get("summary", "No economic release data is available right now."),
+        "next_event": insight.get("next_event"),
+        "upcoming_events": insight.get("upcoming_events", []),
+    }
+
+
+async def _fetch_news_payload(force_refresh: bool = False) -> dict:
+    global news_cache
+    now = time.time()
+    if not force_refresh and news_cache and now - news_cache[0] < 3600:
+        return news_cache[1]
+    try:
+        data = await newsapi.gold_headlines()
+        articles = data.get("articles")
+        if not isinstance(articles, list):
+            raise RuntimeError("NewsAPI returned an unexpected article list.")
+        items = [
+            {
+                "title": article.get("title", ""),
+                "url": article.get("url", ""),
+                "published_at": article.get("publishedAt", ""),
+                "source": (
+                    article.get("source", {}).get("name", "NewsAPI")
+                    if isinstance(article.get("source"), dict)
+                    else "NewsAPI"
+                ),
+                "sentiment_score": score_headline(str(article.get("title") or ""))[0],
+                "bias": score_headline(str(article.get("title") or ""))[1],
+                "impact": score_headline(str(article.get("title") or ""))[2],
+            }
+            for article in articles
+            if isinstance(article, dict)
+        ]
+        result = {"items": items, "source": "NewsAPI", "status": "live"}
+        if not force_refresh:
+            news_cache = (now, result)
+        return result
+    except (RuntimeError, httpx.HTTPError, KeyError, ValueError, TypeError) as error:
+        result = {"items": [], "source": "unavailable", "status": "unavailable", "note": str(error)}
+        if not force_refresh:
+            news_cache = (now, result)
+        return result
+
+
+@app.get("/api/news")
+async def gold_news() -> dict:
+    return await _fetch_news_payload()
+
+
+@app.get("/api/news/sentiment")
+async def news_sentiment() -> dict:
+    news = await _fetch_news_payload(force_refresh=True)
+    items = news.get("items", [])
+    if not items:
+        return {
+            "score": 0,
+            "bias": "neutral",
+            "article_count": 0,
+            "source": news.get("source", "unavailable"),
+            "status": news.get("status", "unavailable"),
+            "note": news.get("note", "No headlines are available for sentiment analysis."),
+        }
+    insight = analyze_news_intelligence(items)
+    return {
+        "score": insight["sentiment"]["score"],
+        "bias": insight["sentiment"]["bias"],
+        "article_count": insight["sentiment"]["article_count"],
+        "source": news.get("source", insight["sentiment"].get("source", "unavailable")),
+        "status": news.get("status", insight["status"]),
+        "method": insight["sentiment"]["method"],
+        "prediction": insight["prediction"],
+        "headline_focus": insight.get("headline_focus"),
+        "timestamp": insight.get("timestamp"),
+    }
+
+
+@app.get("/api/news/intelligence")
+async def news_intelligence() -> dict:
+    news = await _fetch_news_payload(force_refresh=True)
+    items = news.get("items", [])
+    insight = analyze_news_intelligence(items)
+    return {
+        "status": news.get("status", insight.get("status", "unavailable")),
+        "source": news.get("source", "unavailable"),
+        "sentiment": insight.get("sentiment", {
+            "score": 0,
+            "bias": "neutral",
+            "article_count": 0,
+            "source": "unavailable",
+            "method": "No market headlines available.",
+        }),
+        "prediction": insight.get("prediction", {
+            "direction": "neutral",
+            "probability": 0,
+            "confidence": "low",
+            "rationale": "No gold news is currently available.",
+        }),
+        "headline_focus": insight.get("headline_focus"),
+        "timestamp": insight.get("timestamp"),
+    }
+
+
+class AnalysisRequest(BaseModel):
+    headline: str = Field(min_length=5, max_length=1000)
+
+
+class AnalysisResult(BaseModel):
+    bias: Literal["bullish", "bearish", "neutral"]
+    impact: Literal["low", "medium", "high"]
+    confidence: int = Field(ge=0, le=100)
+    rationale: str = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/news/analyze")
+async def analyze_news(
+    request: AnalysisRequest,
+    user: User = Depends(get_current_user),
+) -> dict:
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if api_key:
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={
+                        "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                        "temperature": 0.2,
+                        "response_format": {"type": "json_object"},
+                        "messages": [
+                            {"role": "system", "content": "Assess this headline's likely short-term impact on spot gold (XAU/USD). Return JSON with bias (bullish, bearish, or neutral), impact (low, medium, high), confidence (0-100), and rationale (one sentence). Do not give financial advice."},
+                            {"role": "user", "content": request.headline},
+                        ],
+                    },
+                )
+                response.raise_for_status()
+            import json
+
+            result = json.loads(response.json()["choices"][0]["message"]["content"])
+            validated = AnalysisResult.model_validate(result)
+            return {**validated.model_dump(), "method": "OpenAI", "headline": request.headline}
+        except (httpx.HTTPError, KeyError, ValueError, TypeError) as error:
+            logger.warning("OpenAI analysis unavailable; using local screening: %s", error)
+
+    score, bias, impact = score_headline(request.headline)
+    return {
+        "bias": bias,
+        "impact": impact,
+        "confidence": round(35 + abs(score) * 40) if bias != "neutral" else 35,
+        "rationale": "Keyword-based screening only; verify the source and confirm with market pricing.",
+        "method": "heuristic",
+        "headline": request.headline,
+    }
+
+
+@app.get("/api/signals")
+async def trading_signal() -> dict:
+    history = await gold_history()
+    candles = history["candles"]
+    if len(candles) < 2:
+        return {"signal": "WAIT", "confidence": 0, "source": history["source"], "note": "Price history is unavailable."}
+    closes = [candle["close"] for candle in candles]
+    average = sum(closes[-20:]) / len(closes[-20:])
+    change = (closes[-1] - closes[-2]) / closes[-2] * 100
+    if closes[-1] > average and change > 0:
+        signal = "BUY"
+    elif closes[-1] < average and change < 0:
+        signal = "SELL"
+    else:
+        signal = "WAIT"
+    return {
+        "signal": signal,
+        "confidence": min(85, 50 + round(abs(change) * 12)),
+        "change_percent": round(change, 3),
+        "sma_20": round(average, 2),
+        "source": history["source"],
+        "method": "20-day SMA and daily momentum; informational only",
+    }
+
+
+class RiskRequest(BaseModel):
+    account_balance: float = Field(gt=0)
+    risk_percent: float = Field(gt=0, le=100)
+    entry_price: float = Field(gt=0)
+    stop_price: float = Field(gt=0)
+
+
+@app.post("/api/risk")
+def calculate_risk(request: RiskRequest) -> dict:
+    try:
+        risk_profile = calculate_risk_management(
+            account_balance=request.account_balance,
+            risk_percent=request.risk_percent,
+            entry_price=request.entry_price,
+            stop_price=request.stop_price,
+            reward_ratio=2.0,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return {
+        "risk_amount": risk_profile["risk_amount"],
+        "stop_distance": risk_profile["stop_distance"],
+        "position_ounces": risk_profile["position_ounces"],
+        "standard_lots": risk_profile["standard_lots"],
+        "risk_status": risk_profile["risk_status"],
+        "risk_reward_ratio": risk_profile["risk_reward_ratio"],
+        "target_price": risk_profile["target_price"],
+        "risk_budget_percent": risk_profile["risk_budget_percent"],
+        "position_size_rating": risk_profile["position_size_rating"],
+        "interpretation": risk_profile["interpretation"],
+        "assumption": risk_profile["assumption"],
+    }
+
+
+@app.get("/api/market/heatmap")
+async def gold_driver_heatmap() -> dict:
+    history, news, calendar = await asyncio.gather(
+        gold_history(),
+        gold_news(),
+        economic_calendar(),
+    )
+    candles = history.get("candles", [])
+    closes = [float(candle["close"]) for candle in candles if candle.get("close") is not None]
+    momentum = (
+        (closes[-1] - closes[-6]) / closes[-6]
+        if len(closes) >= 6 and closes[-6]
+        else 0.0
+    )
+    momentum_score = max(-1.0, min(1.0, momentum * 20))
+    headlines = news.get("items", [])
+    sentiment = (
+        sum(item["sentiment_score"] for item in headlines) / len(headlines)
+        if headlines
+        else 0.0
+    )
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(hours=24)
+    upcoming = []
+    for event in calendar.get("events", []):
+        date_value = event.get("date")
+        if not date_value:
+            continue
+        try:
+            event_time = datetime.fromisoformat(date_value.replace("Z", "+00:00"))
+            if event_time.tzinfo is None:
+                event_time = event_time.replace(tzinfo=timezone.utc)
+            else:
+                event_time = event_time.astimezone(timezone.utc)
+        except (AttributeError, ValueError):
+            continue
+        if event_time < now - timedelta(minutes=5):
+            continue
+        if event_time <= cutoff:
+            upcoming.append(event)
+    high_impact_count = sum(event.get("impact", "").lower() == "high" for event in upcoming)
+    factors = [
+        {
+            "name": "Gold momentum",
+            "ticker": "XAU/USD",
+            "score": round(momentum_score, 3),
+            "bias": "bullish" if momentum_score > 0.05 else "bearish" if momentum_score < -0.05 else "neutral",
+            "reading": f"{momentum * 100:+.2f}% over five sessions" if len(closes) >= 6 else "Insufficient price history",
+            "source": history.get("source", "unavailable"),
+        },
+        {
+            "name": "News sentiment",
+            "ticker": "NEWS",
+            "score": round(sentiment, 3),
+            "bias": "bullish" if sentiment > 0.1 else "bearish" if sentiment < -0.1 else "neutral",
+            "reading": f"{len(headlines)} recent headlines" if headlines else "No recent headlines",
+            "source": news.get("source", "unavailable"),
+        },
+        {
+            "name": "USD event risk",
+            "ticker": "USD CAL",
+            "score": 0,
+            "bias": "neutral",
+            "reading": (
+                f"{high_impact_count} high-impact event(s) in next 24h"
+                if calendar.get("status") == "live"
+                else "Calendar data unavailable"
+            ),
+            "source": calendar.get("source", "unavailable"),
+        },
+    ]
+    return {
+        "factors": factors,
+        "status": "live" if history.get("status") == "live" or news.get("status") == "live" else "unavailable",
+        "note": "Only sourced price, headline and calendar factors are shown. This is contextual, not a forecast.",
+    }
+
+
+def serialize_entry(entry: JournalEntry) -> dict:
+    return {
+        "id": entry.id,
+        "side": entry.side,
+        "entry_price": entry.entry_price,
+        "exit_price": entry.exit_price,
+        "quantity_ounces": entry.quantity_ounces,
+        "thesis": entry.thesis,
+        "created_at": entry.created_at.isoformat(),
+        "pnl": round((entry.exit_price - entry.entry_price) * entry.quantity_ounces * (1 if entry.side == "BUY" else -1), 2) if entry.exit_price is not None else None,
+    }
+
+
+@app.get("/api/journal")
+def list_journal(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> list[dict]:
+    entries = db.scalars(
+        select(JournalEntry)
+        .where(JournalEntry.user_id == user.id)
+        .order_by(JournalEntry.created_at.desc())
+    ).all()
+    return [serialize_entry(entry) for entry in entries]
+
+
+@app.post("/api/journal", status_code=201)
+def create_journal_entry(
+    request: JournalCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    entry = JournalEntry(**request.model_dump(), user_id=user.id)
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return serialize_entry(entry)
+
+
+@app.delete("/api/journal/{entry_id}", status_code=204)
+def delete_journal_entry(
+    entry_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    entry = db.scalar(
+        select(JournalEntry).where(JournalEntry.id == entry_id, JournalEntry.user_id == user.id)
+    )
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Journal entry not found.")
+    db.delete(entry)
+    db.commit()
+
+
+@app.get("/api/dashboard")
+async def dashboard_summary(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    entries = db.scalars(select(JournalEntry).where(JournalEntry.user_id == user.id)).all()
+    closed_pnl = [
+        (entry.exit_price - entry.entry_price)
+        * entry.quantity_ounces
+        * (1 if entry.side == "BUY" else -1)
+        for entry in entries
+        if entry.exit_price is not None
+    ]
+    active_alerts = db.scalar(
+        select(func.count()).select_from(PriceAlert).where(
+            PriceAlert.user_id == user.id, PriceAlert.active.is_(True)
+        )
+    ) or 0
+    unread_notifications = db.scalar(
+        select(func.count()).select_from(Notification).where(
+            Notification.user_id == user.id, Notification.read.is_(False)
+        )
+    ) or 0
+    return {
+        "email": user.email,
+        "quote": await gold_quote(),
+        "trade_count": len(entries),
+        "open_positions": sum(entry.exit_price is None for entry in entries),
+        "closed_pnl": round(sum(closed_pnl), 2),
+        "win_rate": round(100 * sum(pnl > 0 for pnl in closed_pnl) / len(closed_pnl), 1)
+        if closed_pnl
+        else None,
+        "active_alerts": active_alerts,
+        "unread_notifications": unread_notifications,
+    }
+
+
+@app.get("/api/alerts")
+def list_alerts(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    alerts = db.scalars(
+        select(PriceAlert)
+        .where(PriceAlert.user_id == user.id)
+        .order_by(PriceAlert.created_at.desc())
+    ).all()
+    return [serialize_alert(alert) for alert in alerts]
+
+
+@app.post("/api/alerts", status_code=201)
+def create_alert(
+    request: AlertCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    alert = PriceAlert(
+        user_id=user.id,
+        direction=request.direction,
+        target_price=request.target_price,
+    )
+    db.add(alert)
+    db.commit()
+    db.refresh(alert)
+    return serialize_alert(alert)
+
+
+@app.delete("/api/alerts/{alert_id}", status_code=204)
+def delete_alert(
+    alert_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    alert = db.scalar(
+        select(PriceAlert).where(PriceAlert.id == alert_id, PriceAlert.user_id == user.id)
+    )
+    if alert is None:
+        raise HTTPException(status_code=404, detail="Price alert not found.")
+    db.delete(alert)
+    db.commit()
+
+
+@app.get("/api/notifications")
+def list_notifications(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    notifications = db.scalars(
+        select(Notification)
+        .where(Notification.user_id == user.id)
+        .order_by(Notification.created_at.desc())
+        .limit(50)
+    ).all()
+    return [serialize_notification(item) for item in notifications]
+
+
+@app.patch("/api/notifications/{notification_id}/read", status_code=204)
+def mark_notification_read(
+    notification_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    notification = db.scalar(
+        select(Notification).where(
+            Notification.id == notification_id,
+            Notification.user_id == user.id,
+        )
+    )
+    if notification is None:
+        raise HTTPException(status_code=404, detail="Notification not found.")
+    notification.read = True
+    db.commit()
